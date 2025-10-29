@@ -40,7 +40,16 @@ def main() -> None:
     setup_logging(level="INFO")
     log = get_logger()
 
+    log.info("=" * 60)
+    log.info("CryptoBot Live Runner starting...")
+    log.info(f"Config: {args.config}")
+    log.info(f"Provider: {args.provider}")
+    log.info(f"Exchange: {args.exchange}")
+    
     symbol = cfg.general.symbols[0]
+    log.info(f"Symbol: {symbol}")
+    log.info(f"Capital: {cfg.general.capital}")
+    log.info(f"Timeframe: {cfg.general.timeframe}")
 
     broker = PaperBroker(
         fee_bps=cfg.broker.fee_bps,
@@ -66,6 +75,13 @@ def main() -> None:
     strategies = {"nof1_baseline": nof1, "llm": llm_strat}
     weights = cfg.ensemble.weights or {"nof1_baseline": 0.5, "llm": 1.5}
     ensemble = EnsembleStrategy(strategies=strategies, weights=weights)
+    
+    log.info(f"Ensemble weights: {weights}")
+    log.info(f"LLM overlay enabled: {bool(overlay_cfg.get('enabled', True))}")
+    if llm_client.api_key:
+        log.info("DeepSeek API key: CONFIGURED")
+    else:
+        log.warning("DeepSeek API key: NOT CONFIGURED (LLM will use defaults)")
 
     overlay_cfg = cfg.ensemble.llm_overlay or {"enabled": True}
     overlay = LLMRiskOverlay(enabled=bool(overlay_cfg.get("enabled", True)), client=llm_client)
@@ -108,6 +124,10 @@ def main() -> None:
             "volume": bar.volume,
         })
         if len(history) < 50:
+            if len(history) == 1:
+                log.info(f"Collecting market data... ({len(history)}/50 bars) - First bar: {bar.close:.2f}")
+            elif len(history) % 10 == 0:
+                log.info(f"Collecting market data... ({len(history)}/50 bars)")
             publish_state(bar.timestamp, bar.close)
             return
         df = pd.DataFrame(history)
@@ -153,8 +173,14 @@ def main() -> None:
             drift=cfg.data.drift,
             volatility=cfg.data.volatility,
         )
+        log.info("Starting random walk data provider...")
+        log.info(f"Starting price: 30000.0, Seed: {params.seed}, Volatility: {params.volatility}")
+        bar_count = 0
         for bar in random_walk_bars(symbol=symbol, p=params, start_price=30000.0):
             handle_bar(bar)
+            bar_count += 1
+            if bar_count == 1:
+                log.info("Processing bars... (waiting for 50 bars before trading)")
             time.sleep(1.0)
 
 
