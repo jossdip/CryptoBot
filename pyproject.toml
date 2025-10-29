@@ -1,0 +1,32 @@
+[project]
+name = "cryptobot"
+version = "0.1.0"
+description = "Modular crypto day-trading bot with paper trading and AI overlays"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Joss", email = "dev@example.com" }
+]
+
+dependencies = [
+  "pandas>=2.2.2",
+  "numpy>=2.1.3",
+  "pydantic>=2.9.2",
+  "pydantic-settings>=2.4.0",
+  "PyYAML>=6.0.2",
+  "httpx>=0.27.2",
+  "loguru>=0.7.2",
+  "rich>=13.9.4",
+  "ccxt>=4.3.87"
+]
+
+[project.scripts]
+cryptobot = "cryptobot.cli.run:main"
+cryptobot-live = "cryptobot.cli.live:main"
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+

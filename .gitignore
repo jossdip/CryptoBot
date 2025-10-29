@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual envs
+.venv/
+venv/
+ENV/
+
+# OS
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Build/Dist
+dist/
+build/
+*.egg-info/
+
+# Env
+.env
+.env.*
+
