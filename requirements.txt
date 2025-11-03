@@ -10,4 +10,6 @@ ccxt>=4.3.87
 python-dotenv>=1.0.1
 fastapi>=0.115.0
 uvicorn>=0.32.0
+prompt-toolkit>=3.0.0
+sqlalchemy>=2.0.0
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, Optional
 
 import pandas as pd
 
@@ -47,4 +47,30 @@ class LLMStrategy:
             decision = None
         self._last_call_ts = time.time()
         self._last_decision = decision
+        return decision
+
+    def decide_futures(self, df: pd.DataFrame, extra_context: Optional[Dict] = None) -> Dict:
+        """Return {direction,long|short|flat; leverage:int; confidence:float}. Cools down calls."""
+        if not self._should_call(df):
+            # reuse last decision when on cooldown
+            last = self._last_decision or None
+            if last == "buy":
+                return {"direction": "long", "leverage": 1, "confidence": 0.0}
+            if last == "sell":
+                return {"direction": "short", "leverage": 1, "confidence": 0.0}
+            return {"direction": "flat", "leverage": 1, "confidence": 0.0}
+
+        recent = df.iloc[-180:].copy()
+        # Downsample to reduce token cost
+        sample = recent.iloc[-60:]
+        ctx = {
+            "recent": {k: [float(x) for x in sample[k].tolist()] for k in sample.columns if k in {"open","high","low","close","volume"}},
+        }
+        if extra_context:
+            ctx.update(extra_context)
+        decision = self.client.decide_futures(ctx)
+        self._last_call_ts = time.time()
+        # store a coarse mapping for compatibility with last_decision
+        dir_map = {"long": "buy", "short": "sell", "flat": None}
+        self._last_decision = dir_map.get(str(decision.get("direction", "flat")), None)
         return decision

@@ -18,12 +18,17 @@ dependencies = [
   "httpx>=0.27.2",
   "loguru>=0.7.2",
   "rich>=13.9.4",
-  "ccxt>=4.3.87"
+  "ccxt>=4.3.87",
+  "python-dotenv>=1.0.1",
+  "websockets>=12.0",
+  "hyperliquid-python-sdk>=0.1.0"
 ]
 
 [project.scripts]
-cryptobot = "cryptobot.cli.run:main"
+cryptobot = "cryptobot.cli.interactive:main"
+cb = "cryptobot.cli.interactive:main"
 cryptobot-live = "cryptobot.cli.live:main"
+cryptobot-live-hl = "cryptobot.cli.live_hyperliquid:main"
 
 [build-system]
 requires = ["setuptools>=69", "wheel"]

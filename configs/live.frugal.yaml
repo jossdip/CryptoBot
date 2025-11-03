@@ -3,8 +3,10 @@ general:
   start: "2024-01-01"
   end: "2030-01-01"
   timeframe: "1m"
-  capital: 10000.0
+  capital: 1000.0  # Capital de départ en USDT pour paper trading
   symbols: ["BTC/USDT"]
+  market_type: futures
+  exchange_id: bybit  # Bybit : excellent choix pour traders français (futures avec leviers)
 
 data:
   provider: ccxt
@@ -13,11 +15,16 @@ data:
   volatility: 0.02
 
 broker:
-  fee_bps: 10
+  fee_bps: 2           # 0.02% taker (futures taker fee approximatif)
   slippage_bps: 5
+  testnet: true        # Utilise les endpoints testnet pour récupérer les données (sans risque)
+  margin_mode: isolated
+  default_leverage: 5
+  max_leverage: 20
+  place_on_testnet: true  # ACTIVE le placement réel d'ordres sur le testnet Bybit
 
 risk:
-  max_position_pct: 0.2
+  max_position_pct: 1.0  # Pas de limite (comme nof1.ai) - seulement limité par la marge disponible
   max_daily_drawdown_pct: 5
 
 strategy:
@@ -41,3 +48,16 @@ ensemble:
 backtest:
   report:
     output_dir: logs/reports
+
+cli:
+  interactive: true
+  logo_enabled: true
+  prompt_format: "[CryptoBot@{exchange}:{status}] > "
+
+monitor:
+  enabled: true
+  storage_type: "sqlite"
+  storage_path: "~/.cryptobot/monitor.db"
+  collect_interval_sec: 5
+  retention_days: 30
+  llm_insights_enabled: true

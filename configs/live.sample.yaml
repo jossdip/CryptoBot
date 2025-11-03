@@ -5,6 +5,8 @@ general:
   timeframe: "1m"
   capital: 10000.0
   symbols: ["BTC/USDT"]
+  market_type: spot
+  exchange_id: binance
 
 data:
   provider: ccxt
@@ -15,6 +17,11 @@ data:
 broker:
   fee_bps: 10
   slippage_bps: 5
+  testnet: false
+  margin_mode: isolated
+  default_leverage: 5
+  max_leverage: 20
+  place_on_testnet: false
 
 risk:
   max_position_pct: 0.2
@@ -41,3 +48,16 @@ ensemble:
 backtest:
   report:
     output_dir: logs/reports
+
+cli:
+  interactive: true
+  logo_enabled: true
+  prompt_format: "[CryptoBot@{exchange}:{status}] > "
+
+monitor:
+  enabled: true
+  storage_type: "sqlite"
+  storage_path: "~/.cryptobot/monitor.db"
+  collect_interval_sec: 5
+  retention_days: 30
+  llm_insights_enabled: true

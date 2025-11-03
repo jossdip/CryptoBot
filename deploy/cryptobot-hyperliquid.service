@@ -1,0 +1,17 @@
+[Unit]
+Description=CryptoBot Hyperliquid Trading Bot
+After=network.target
+
+[Service]
+Type=simple
+User=cryptobot
+WorkingDirectory=/opt/cryptobot
+Environment="PYTHONPATH=/opt/cryptobot"
+EnvironmentFile=/opt/cryptobot/.env
+ExecStart=/usr/bin/python3 -m cryptobot.cli.live_hyperliquid --config configs/live.hyperliquid.yaml
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+

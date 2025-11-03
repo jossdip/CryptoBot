@@ -12,8 +12,12 @@ class RiskManager:
     def max_position_value(self, equity: float) -> float:
         return max(0.0, equity * float(self.cfg.max_position_pct))
 
-    def additional_qty_allowed(self, equity: float, price: float, current_qty: float) -> float:
-        max_val = self.max_position_value(equity)
-        cur_val = max(0.0, current_qty * price)
-        room = max(0.0, max_val - cur_val)
-        return room / price if price > 0 else 0.0
+    def additional_qty_allowed(self, equity: float, price: float, current_qty: float, leverage: float = 1.0) -> float:
+        # No position size limit (similar to nof1.ai approach)
+        # Only limited by available margin for leverage
+        lev = max(1.0, float(leverage))
+        # Maximum notional = available equity * leverage
+        max_notional = equity * lev
+        current_notional = abs(current_qty) * price
+        available_notional = max(0.0, max_notional - current_notional)
+        return available_notional / price if price > 0 else 0.0

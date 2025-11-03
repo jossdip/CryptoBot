@@ -1,0 +1,88 @@
+general:
+  seed: 42
+  start: "2024-01-01"
+  end: "2030-01-01"
+  timeframe: "1m"
+  capital: 10000.0
+  symbols: ["BTC/USD:USD", "ETH/USD:USD"]
+  market_type: futures
+  exchange_id: hyperliquid
+
+hyperliquid:
+  testnet: true  # false for live
+  wallet_address: ""  # from .env
+  private_key: ""  # from .env (never commit!)
+  default_leverage: 10
+  max_leverage: 50
+  margin_mode: isolated
+
+data:
+  provider: hyperliquid
+  steps_per_bar: 20
+  monitor_new_listings: true  # for sniping
+
+broker:
+  fee_bps: 2  # Hyperliquid taker fee
+  slippage_bps: 5
+  testnet: true
+  margin_mode: isolated
+  default_leverage: 10
+  max_leverage: 50
+
+risk:
+  max_position_pct: 1.0
+  max_daily_drawdown_pct: 10
+  max_leverage_per_strategy: 30  # safety limit
+
+llm:
+  enabled: true
+  model: deepseek-chat
+  base_url: https://api.deepseek.com/v1
+  api_key: ""  # from .env
+  decision_interval_sec: 90  # Optimized: 90s au lieu de 30s (économise ~$22/mois)
+  context_window_bars: 30  # Optimized: 30 bars au lieu de 60 (réduit tokens de 50%)
+  allocation_interval_sec: 180  # Allocation stratégies toutes les 3min au lieu de chaque cycle
+  max_opportunities_per_cycle: 5  # Limite opportunités par cycle pour réduire appels LLM
+  min_opportunity_score: 0.6  # Score minimum avant appel LLM (filtre préalable)
+  monthly_budget_usd: 32.0  # Budget mensuel max: 30€ ≈ $32
+  
+strategy_weights:
+  initial_weights:
+    market_making: 0.35  # Base stable, revenus réguliers (stratégie #1)
+    momentum: 0.25  # Suit les tendances fortes (stratégie #2)
+    scalping: 0.15  # Trades fréquents, profits réguliers (stratégie #3)
+    arbitrage: 0.12  # Opportunités sûres mais limitées (stratégie #4)
+    breakout: 0.08  # Moins fréquent mais gros potentiel (stratégie #5)
+    sniping: 0.05  # Très risqué, limité (stratégie #6)
+
+sentiment:
+  reddit:
+    enabled: true
+    subreddits: ["cryptocurrency", "bitcoin", "ethtrader"]
+    check_interval_sec: 300
+  twitter:
+    enabled: true
+    keywords: ["BTC", "ETH", "crypto"]
+    check_interval_sec: 300
+  polymarket:
+    enabled: true
+    keywords: ["BTC", "ETH", "bitcoin", "ethereum", "crypto", "cryptocurrency"]
+    check_interval_sec: 300
+
+backtest:
+  report:
+    output_dir: logs/reports
+
+cli:
+  interactive: true
+  logo_enabled: true
+  prompt_format: "[CryptoBot@{exchange}:{status}] > "
+
+monitor:
+  enabled: true
+  storage_type: "sqlite"
+  storage_path: "~/.cryptobot/monitor.db"
+  collect_interval_sec: 5
+  retention_days: 30
+  llm_insights_enabled: true
+
