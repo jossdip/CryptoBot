@@ -12,7 +12,7 @@ pip install -r requirements.txt
 
 2. Copy env and config
 ```bash
-cp .env.example .env
+cp env.example .env  # or run scripts/setup_env_local.sh to create ~/.cryptobot/.env
 cp configs/paper.sample.yaml configs/run.yaml
 ```
 
@@ -32,6 +32,15 @@ export LLM_MODEL=deepseek-chat
 export EXCHANGE_API_KEY=...       # optional for testnet mirroring
 export EXCHANGE_API_SECRET=...
 ```
+
+You can also place all variables in `~/.cryptobot/.env` (auto-loaded), or in a project `.env` file. Both are ignored by git.
+
+### Sensitive data policy (public repo safe)
+- Secrets are never read from YAML; only from environment variables.
+- Use `~/.cryptobot/.env` or project `.env` to store keys locally.
+- Local override configs can be named `*.local.yaml` (ignored by git).
+- Optional git guard: install `scripts/pre_commit_secrets_guard.sh` as a pre-commit hook to block accidental key commits.
+  - Install: `ln -s ../../scripts/pre_commit_secrets_guard.sh .git/hooks/pre-commit && chmod +x scripts/pre_commit_secrets_guard.sh`
 
 2. Use the frugal live config (20 USDT, futures, isolated, leverage chosen by LLM)
 ```bash

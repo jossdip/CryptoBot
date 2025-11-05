@@ -76,7 +76,7 @@ backtest:
 cli:
   interactive: true
   logo_enabled: true
-  prompt_format: "[CryptoBot@{exchange}:{status}] > "
+  prompt_format: "[C4$H@{exchange}:{status}] > "
 
 monitor:
   enabled: true

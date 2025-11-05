@@ -8,7 +8,6 @@ from pathlib import Path
 import threading
 
 import pandas as pd
-from dotenv import load_dotenv
 
 from cryptobot.broker.paper import PaperBroker
 from cryptobot.broker.futures_paper import FuturesPaperBroker
@@ -17,6 +16,7 @@ from cryptobot.broker.risk import RiskManager
 from cryptobot.core.config import AppConfig
 from cryptobot.core.logging import get_logger, setup_logging
 from cryptobot.core.types import Bar
+from cryptobot.core.env import load_local_environment
 from cryptobot.data.ccxt_live import live_ohlcv
 from cryptobot.data.coingecko import fetch_market_metadata
 from cryptobot.data.random_walk import RandomWalkParams, random_walk_bars
@@ -38,7 +38,7 @@ def main() -> None:
     parser.add_argument("--dashboard-port", type=int, default=8000)
     args = parser.parse_args()
 
-    load_dotenv()
+    load_local_environment()
     cfg = AppConfig.load(args.config)
     setup_logging(level="INFO")
     log = get_logger()

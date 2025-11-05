@@ -112,7 +112,7 @@ class BacktestConfig(BaseModel):
 class CLIConfig(BaseModel):
     interactive: bool = True
     logo_enabled: bool = True
-    prompt_format: str = "[CryptoBot@{exchange}:{status}] > "
+    prompt_format: str = "[C4$H@{exchange}:{status}] > "
 
 
 class MonitorConfig(BaseModel):

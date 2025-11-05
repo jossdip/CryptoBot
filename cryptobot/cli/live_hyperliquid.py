@@ -4,11 +4,10 @@ import time
 import argparse
 from typing import Dict, Any
 
-from dotenv import load_dotenv
-
 from cryptobot.core.config import AppConfig
 from cryptobot.core.logging import get_logger, setup_logging
 from cryptobot.core.mode_manager import ModeManager
+from cryptobot.core.env import load_local_environment
 from cryptobot.broker.hyperliquid_broker import HyperliquidBroker
 from cryptobot.llm.client import LLMClient
 from cryptobot.llm.orchestrator import LLMOrchestrator
@@ -26,7 +25,7 @@ from cryptobot.data.context_aggregator import MarketContextAggregator
 
 
 def run_live(config_path: str) -> None:
-    load_dotenv()
+    load_local_environment()
     cfg = AppConfig.load(config_path)
     setup_logging(level="INFO")
     log = get_logger()
@@ -235,7 +234,7 @@ def run_live(config_path: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="CryptoBot Hyperliquid Live Runner")
+    parser = argparse.ArgumentParser(description="C4$H M4CH1N3 Hyperliquid Live Runner")
     parser.add_argument("--config", type=str, default="configs/live.hyperliquid.yaml")
     args = parser.parse_args()
     run_live(args.config)

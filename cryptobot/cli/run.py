@@ -5,13 +5,13 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
-from dotenv import load_dotenv
 
 from cryptobot.backtest.engine import BacktestEngine
 from cryptobot.broker.paper import PaperBroker
 from cryptobot.broker.risk import RiskManager
 from cryptobot.core.config import AppConfig
 from cryptobot.core.logging import get_logger, setup_logging
+from cryptobot.core.env import load_local_environment
 from cryptobot.data.random_walk import RandomWalkParams, random_walk_bars
 from cryptobot.strategy.ensemble import EnsembleStrategy
 from cryptobot.strategy.nof1 import Nof1Params, Nof1Strategy
@@ -23,7 +23,7 @@ def main() -> None:
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
     args = parser.parse_args()
 
-    load_dotenv()
+    load_local_environment()
     cfg = AppConfig.load(args.config)
     setup_logging(level="INFO")
     log = get_logger()

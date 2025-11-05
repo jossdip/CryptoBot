@@ -50,7 +50,7 @@ class InteractiveShell:
 
         while True:
             try:
-                prompt = build_prompt(exchange=exchange, status=self._status, fmt=getattr(getattr(cfg, "cli", None), "prompt_format", "[CryptoBot@{exchange}:{status}] > "))
+                prompt = build_prompt(exchange=exchange, status=self._status, fmt=getattr(getattr(cfg, "cli", None), "prompt_format", "[C4$H@{exchange}:{status}] > "))
                 line = self._session.prompt(prompt, completer=completer)
             except (EOFError, KeyboardInterrupt):
                 self.console.print("Exiting...")
@@ -71,7 +71,7 @@ class InteractiveShell:
                 self._print_help()
                 continue
             if cmd == "version" or cmd == "v":
-                self.console.print("CryptoBot Interactive v0.1.0")
+                self.console.print("C4$H M4CH1N3 Interactive v0.1.0")
                 continue
             if cmd == "status" or cmd == "stat":
                 self.console.print(f"Status: {self._status}")
