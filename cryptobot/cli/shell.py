@@ -12,7 +12,9 @@ from prompt_toolkit.history import InMemoryHistory
 from rich.console import Console
 
 from cryptobot.cli.prompt import build_prompt
+from cryptobot.cli.logo import start_animated_logo, refresh_animated_logo, stop_animated_logo
 from cryptobot.cli.commands.monitor import MonitorCommand
+from cryptobot.cli.commands.config import ConfigCommand
 from cryptobot.cli.commands.base import Command
 from cryptobot.monitor.storage import StorageManager
 from cryptobot.monitor.reporter import ReportGenerator
@@ -30,10 +32,13 @@ class InteractiveShell:
         self._running_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._register_commands()
+        # Démarrer l'animation du logo
+        start_animated_logo()
 
     def _register_commands(self) -> None:
         # Built-ins
         self._commands["monitor"] = MonitorCommand(self.context)
+        self._commands["config"] = ConfigCommand(self.context)
         # Aliases
         for name, cmd in list(self._commands.items()):
             for al in getattr(cmd, "aliases", []):
@@ -54,6 +59,7 @@ class InteractiveShell:
                 line = self._session.prompt(prompt, completer=completer)
             except (EOFError, KeyboardInterrupt):
                 self.console.print("Exiting...")
+                stop_animated_logo()
                 break
 
             parts = shlex.split(line.strip())
@@ -63,9 +69,12 @@ class InteractiveShell:
             cmd = cmd.lower()
             if cmd in {"exit", "quit", "q"}:
                 self._stop_trading()
+                stop_animated_logo()
                 break
             if cmd in {"clear", "cls"}:
                 self.console.clear()
+                # Rafraîchir le logo animé après le clear
+                refresh_animated_logo()
                 continue
             if cmd in {"help", "h", "?"}:
                 self._print_help()

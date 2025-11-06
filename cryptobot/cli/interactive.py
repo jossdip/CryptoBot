@@ -17,9 +17,9 @@ def main() -> None:  # pragma: no cover - entrypoint
     load_local_environment()
 
     cfg = AppConfig.load(args.config)
-    if bool(getattr(cfg.cli, "logo_enabled", True)):
-        show_logo()
-
+    # Ne plus afficher le logo statique ici car l'animation démarre automatiquement dans InteractiveShell
+    # L'animation permanente sera gérée par InteractiveShell
+    
     context: Dict[str, Any] = {
         "config": cfg,
         "config_path": args.config,
