@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Usage: ./deploy/setup_vps.sh <repo_url> [branch]
-# Example: ./deploy/setup_vps.sh git@github.com:you/CryptoBot.git main
+# Example: ./deploy/setup_vps.sh https://github.com/jossdip/CryptoBot.git main
+# Or with SSH: ./deploy/setup_vps.sh git@github.com:jossdip/CryptoBot.git main
 
 REPO_URL=${1:-}
 BRANCH=${2:-main}
@@ -33,6 +34,9 @@ if [[ -f requirements.txt ]]; then
 else
   pip install -e .
 fi
+
+# Ensure console scripts (cryptobot, cb) are installed
+pip install -e .
 
 if [[ ! -f .env ]]; then
   echo "Creating .env from configs/deepseek.env.sample (edit with your keys)"

@@ -71,7 +71,7 @@ cryptobot/
   core/          # types, config, logging, utils
   data/          # providers (random_walk, exchange in future)
   broker/        # paper execution, portfolio, risk
-  strategy/      # strategies: base, nof1, stubs
+  strategy/      # strategies: baseline (nof1) + live modules (arbitrage, MM, etc.)
   llm/           # risk overlay adapters
   web/           # crawlers stubs
   backtest/      # engine and reporting
@@ -80,29 +80,9 @@ configs/
 logs/ context/ decisions/ strategy/
 ```
 
-## Trading en France - Solution Légal
+## Ressources et documentation
 
-**Problème :** Les exchanges comme Binance/Bybit/MEXC bloquent les futures pour les résidents français.
-
-**Solution :** Utilisez Deribit (accepte les Français, trading 24/7, retrait bancaire simple).
-
-**Guides disponibles :**
-- 📋 **`RESUME_SOLUTION.md`** → Résumé ultra-simple (3 étapes)
-- 📖 **`GUIDE_SOLUTION_FRANCE.md`** → Explication complète de toutes les solutions
-- 🔧 **`GUIDE_DERIBIT_SETUP.md`** → Guide pratique étape par étape pour configurer Deribit
-- ⚙️ **`configs/live.deribit.yaml`** → Configuration prête pour Deribit
-
-**Démarrage rapide avec Deribit :**
-1. Ouvrez un compte sur https://www.deribit.com/ (KYC requis, gratuit)
-2. Créez une clé API (Account → API)
-3. Mettez vos clés dans `.env` :
-   ```
-   EXCHANGE_API_KEY=votre_cle_deribit
-   EXCHANGE_API_SECRET=votre_secret_deribit
-   ```
-4. Lancez : `python -m cryptobot.cli.live --config configs/live.deribit.yaml --provider ccxt`
-
-**Important :** Déclarez vos gains aux impôts français (revenus de capitaux mobiliers).
+Consultez `docs/DOCUMENTATION_UNIFIEE.md` pour les guides d'installation, bonnes pratiques (sécurité/coûts), providers (CCXT/Hyperliquid), et considérations légales (France).
 
 ## Disclaimers
 This software is for research and paper-trading only. No financial advice. Use at your own risk.

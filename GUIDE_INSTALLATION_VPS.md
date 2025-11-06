@@ -24,13 +24,44 @@ ssh user@votre-vps-ip
 
 ```bash
 # Télécharger le script directement
-curl -o setup_vps.sh https://raw.githubusercontent.com/votre-username/CryptoBot/main/deploy/setup_vps.sh
+curl -o setup_vps.sh https://raw.githubusercontent.com/jossdip/CryptoBot/main/deploy/setup_vps.sh
 
 # Rendre exécutable
 chmod +x setup_vps.sh
 
-# Exécuter avec votre URL de repo Git
-./setup_vps.sh git@github.com:votre-username/CryptoBot.git main
+# Exécuter avec votre URL de repo Git (HTTPS par défaut, plus simple)
+./setup_vps.sh https://github.com/jossdip/CryptoBot.git main
+
+# OU si vous avez configuré SSH :
+# ./setup_vps.sh git@github.com:jossdip/CryptoBot.git main
+```
+
+### 3. Lancer l'interface interactive (recommandé)
+
+```bash
+cd ~/CryptoBot
+source .venv/bin/activate
+
+# Lancer l'interface CLI personnalisée
+cryptobot
+# ou
+cb
+```
+
+Dans l'interface, vous pouvez utiliser par exemple :
+
+```bash
+[CryptoBot@Hyperliquid:STOPPED] > start --config configs/live.hyperliquid.yaml
+[CryptoBot@Hyperliquid:ACTIVE] > monitor --trades 20 --refresh 3 --insights --live
+[CryptoBot@Hyperliquid:ACTIVE] > trades --limit 10
+[CryptoBot@Hyperliquid:ACTIVE] > portfolio
+[CryptoBot@Hyperliquid:ACTIVE] > performance --period 24h
+```
+
+Si la commande `cryptobot` n'est pas trouvée, assurez-vous que l'environnement virtuel est activé et installez les entrypoints:
+
+```bash
+pip install -e .
 ```
 
 **Option B : Installation manuelle (si vous préférez)**
@@ -41,11 +72,14 @@ sudo apt update
 sudo apt -y upgrade
 sudo apt -y install git python3 python3-venv python3-pip
 
-# 2. Cloner le repo
+# 2. Cloner le repo (HTTPS par défaut, plus simple)
 cd ~
-git clone git@github.com:votre-username/CryptoBot.git
+git clone https://github.com/jossdip/CryptoBot.git
 cd CryptoBot
 git checkout main
+
+# OU si vous avez configuré SSH :
+# git clone git@github.com:jossdip/CryptoBot.git
 
 # 3. Créer l'environnement virtuel
 python3 -m venv .venv
@@ -65,7 +99,7 @@ Le script fait automatiquement :
 - ✅ Installation des dépendances
 - ✅ Création du fichier `.env` (à remplir ensuite)
 
-### 3. Configurer les variables d'environnement
+### 4. Configurer les variables d'environnement
 
 ```bash
 cd ~/CryptoBot
@@ -82,6 +116,238 @@ Remplissez au minimum :
 LLM_BASE_URL=https://api.deepseek.com/v1
 LLM_MODEL=deepseek-chat
 LLM_API_KEY=votre_cle_deepseek
+```
+
+---
+
+## 🔐 Configuration Complète du .env pour Hyperliquid Testnet
+
+### Explication : Pourquoi DeepSeek est utilisé sans lancer le bot ?
+
+**⚠️ IMPORTANT :** Si vous avez mis votre clé DeepSeek dans le `.env` hier soir et que vous voyez déjà **une centaine de requêtes API** alors que vous n'avez pas lancé le bot, voici les causes possibles :
+
+#### 🔍 Causes Probables (par ordre de probabilité)
+
+1. **Un service systemd tourne en arrière-plan** (le plus probable)
+   - Si vous avez installé le service systemd, il peut tourner automatiquement
+   - Le bot peut redémarrer automatiquement après un crash
+   - Vérifiez avec : `sudo systemctl status cryptobot-*`
+
+2. **Un processus Python orphelin**
+   - Un ancien lancement du bot qui n'a pas été arrêté proprement
+   - Un processus qui tourne dans un screen/tmux que vous avez oublié
+
+3. **Des tests ou scripts lancés par erreur**
+   - Quelqu'un a lancé un test ou un script qui utilise la clé
+   - Un cron job ou un script automatique
+
+4. **Le bot a été lancé puis arrêté rapidement**
+   - Vous avez peut-être lancé le bot pour tester puis oublié
+   - Le bot a fait quelques cycles avant d'être arrêté
+
+#### ✅ Comment Vérifier et Arrêter
+
+**Sur votre VPS, exécutez ces commandes :**
+
+```bash
+# 1. Vérifier tous les processus Python qui tournent
+ps aux | grep python | grep -v grep
+
+# 2. Vérifier spécifiquement les processus cryptobot
+ps aux | grep cryptobot | grep -v grep
+
+# 3. Vérifier les services systemd actifs
+sudo systemctl list-units --type=service | grep cryptobot
+
+# 4. Vérifier le statut de chaque service cryptobot
+sudo systemctl status cryptobot-paper@$(whoami) 2>/dev/null || echo "Service paper non trouvé"
+sudo systemctl status cryptobot-live@$(whoami) 2>/dev/null || echo "Service live non trouvé"
+sudo systemctl status cryptobot-hyperliquid@$(whoami) 2>/dev/null || echo "Service hyperliquid non trouvé"
+
+# 5. Vérifier les sessions screen/tmux
+screen -ls 2>/dev/null || echo "Aucune session screen"
+tmux ls 2>/dev/null || echo "Aucune session tmux"
+```
+
+#### 🛑 Comment Arrêter Tout Processus Actif
+
+```bash
+# Arrêter tous les services systemd cryptobot
+sudo systemctl stop cryptobot-paper@$(whoami) 2>/dev/null
+sudo systemctl stop cryptobot-live@$(whoami) 2>/dev/null
+sudo systemctl stop cryptobot-hyperliquid@$(whoami) 2>/dev/null
+
+# Tuer tous les processus Python cryptobot (si nécessaire)
+pkill -f "cryptobot" || echo "Aucun processus cryptobot trouvé"
+
+# Vérifier qu'il n'y a plus rien qui tourne
+ps aux | grep -E "(cryptobot|python.*cryptobot)" | grep -v grep || echo "✅ Aucun processus actif"
+```
+
+#### 🔒 Comment Éviter que ça se Reproduise
+
+1. **Ne mettez la clé DeepSeek dans le `.env` que quand vous êtes prêt à lancer le bot**
+2. **Vérifiez toujours qu'aucun processus ne tourne avant de mettre la clé**
+3. **Utilisez un budget mensuel** dans la config YAML pour limiter les coûts :
+   ```yaml
+   llm:
+     monthly_budget_usd: 32.0  # Arrête le bot si budget dépassé
+   ```
+4. **Surveillez les coûts régulièrement** :
+   ```bash
+   python scripts/show_llm_costs.py  # Affiche les stats de coûts
+   ```
+
+#### 📊 Vérifier les Coûts Actuels
+
+```bash
+# Sur votre VPS, vérifier les coûts LLM
+cd ~/CryptoBot
+source .venv/bin/activate
+python scripts/show_llm_costs.py
+```
+
+Cela vous montrera :
+- Le nombre total d'appels API
+- Le coût total
+- Les appels par type
+- Une estimation mensuelle
+
+---
+
+### Configuration Complète pour Hyperliquid Testnet
+
+Voici **exactement** ce que vous devez mettre dans votre fichier `.env` sur le VPS pour lancer le bot sur le **testnet Hyperliquid** :
+
+```bash
+# ============================================
+# DEEPSEEK LLM (OBLIGATOIRE pour le bot)
+# ============================================
+LLM_BASE_URL=https://api.deepseek.com/v1
+LLM_MODEL=deepseek-chat
+LLM_API_KEY=sk-votre_cle_deepseek_ici
+
+# Limites de coût (optionnel mais recommandé)
+LLM_MIN_COOLDOWN_SEC=300
+LLM_MIN_ATR_RATIO=0.0015
+
+# ============================================
+# HYPERLIQUID TESTNET (OBLIGATOIRE)
+# ============================================
+# Votre adresse wallet (la même pour testnet et mainnet)
+HYPERLIQUID_WALLET_ADDRESS=0xVotreAdresseWalletIci
+
+# Clé privée TESTNET (pour tester sans risque)
+HYPERLIQUID_TESTNET_PRIVATE_KEY=0xVotreClePriveeTestnetIci
+
+# ⚠️ NE PAS REMPLIR pour le testnet :
+# HYPERLIQUID_LIVE_PRIVATE_KEY=  # LAISSEZ VIDE pour testnet !
+
+# URLs (optionnel, valeurs par défaut déjà correctes)
+HYPERLIQUID_TESTNET_URL=https://api.hyperliquid-testnet.xyz
+HYPERLIQUID_LIVE_URL=https://api.hyperliquid.xyz
+
+# ============================================
+# AUTRES EXCHANGES (OPTIONNEL)
+# ============================================
+# Pour arbitrage entre exchanges (optionnel)
+EXCHANGE_API_KEY=
+EXCHANGE_API_SECRET=
+```
+
+### 📝 Explication de Chaque Variable
+
+| Variable | Description | Où la trouver ? |
+|----------|-------------|-----------------|
+| `LLM_API_KEY` | Clé API DeepSeek (obligatoire) | Sur https://platform.deepseek.com/ |
+| `HYPERLIQUID_WALLET_ADDRESS` | Adresse de votre wallet (même pour testnet/mainnet) | Dans votre wallet MetaMask ou autre |
+| `HYPERLIQUID_TESTNET_PRIVATE_KEY` | Clé privée pour le **testnet uniquement** | Export depuis votre wallet testnet |
+| `HYPERLIQUID_LIVE_PRIVATE_KEY` | Clé privée pour le **mainnet** (⚠️ NE PAS REMPLIR pour testnet) | Export depuis votre wallet mainnet |
+
+### 🔑 Comment Obtenir Vos Clés Hyperliquid
+
+#### 1. Adresse Wallet (`HYPERLIQUID_WALLET_ADDRESS`)
+- C'est votre adresse Ethereum (commence par `0x`)
+- La même pour testnet et mainnet
+- Exemple : `0x1234567890abcdef1234567890abcdef12345678`
+
+#### 2. Clé Privée Testnet (`HYPERLIQUID_TESTNET_PRIVATE_KEY`)
+- **Pour le testnet** : Créez un wallet de test ou utilisez un wallet existant
+- Exportez la clé privée depuis MetaMask ou votre wallet
+- Format : `0x` suivi de 64 caractères hexadécimaux
+- Exemple : `0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890`
+
+#### 3. Clé Privée Mainnet (`HYPERLIQUID_LIVE_PRIVATE_KEY`)
+- **⚠️ NE PAS REMPLIR si vous testez sur testnet !**
+- Laissez cette ligne vide ou commentez-la
+- Ne la remplissez que quand vous passerez en mode live/mainnet
+
+### ✅ Vérification de la Configuration
+
+Après avoir rempli votre `.env`, vérifiez que tout est correct :
+
+```bash
+# Sur votre VPS, vérifier le contenu du .env
+cd ~/CryptoBot
+cat .env | grep -v "^#" | grep -v "^$"  # Affiche seulement les lignes non-vides et non-commentées
+
+# Vérifier que les variables sont bien chargées
+source .venv/bin/activate
+python3 -c "import os; from dotenv import load_dotenv; load_dotenv(); print('LLM_API_KEY:', 'OK' if os.getenv('LLM_API_KEY') else 'MANQUANT'); print('HYPERLIQUID_WALLET_ADDRESS:', 'OK' if os.getenv('HYPERLIQUID_WALLET_ADDRESS') else 'MANQUANT'); print('HYPERLIQUID_TESTNET_PRIVATE_KEY:', 'OK' if os.getenv('HYPERLIQUID_TESTNET_PRIVATE_KEY') else 'MANQUANT')"
+```
+
+### 🚀 Lancer le Bot sur Testnet Hyperliquid
+
+Une fois le `.env` configuré, lancez le bot avec :
+
+```bash
+cd ~/CryptoBot
+source .venv/bin/activate
+
+# Utiliser la config testnet optimisée
+python -m cryptobot.cli.live_hyperliquid --config configs/live.hyperliquid.testnet.optimized.yaml
+
+# OU utiliser la config standard (vérifiez que testnet: true est dans le YAML)
+python -m cryptobot.cli.live_hyperliquid --config configs/live.hyperliquid.yaml
+```
+
+**Important :** Vérifiez que dans votre fichier YAML (`configs/live.hyperliquid.yaml`), vous avez :
+```yaml
+hyperliquid:
+  testnet: true  # ✅ Doit être true pour testnet
+```
+
+### 🔄 Passer du Testnet au Mainnet
+
+Quand vous serez prêt pour le mainnet :
+
+1. **Modifiez le `.env`** :
+   ```bash
+   # Commentez ou supprimez la ligne testnet
+   # HYPERLIQUID_TESTNET_PRIVATE_KEY=0x...  # NE PLUS UTILISER
+   
+   # Décommentez et remplissez la ligne mainnet
+   HYPERLIQUID_LIVE_PRIVATE_KEY=0xVotreClePriveeMainnetIci
+   ```
+
+2. **Modifiez le fichier YAML** :
+   ```yaml
+   hyperliquid:
+     testnet: false  # ✅ Passer à false pour mainnet
+   ```
+
+3. **Relancez le bot** avec la même commande
+
+---
+
+### ⚠️ Sécurité : Ne Jamais Committer le .env
+
+```bash
+# Vérifier que .env est dans .gitignore
+grep "^\.env$" .gitignore || echo ".env" >> .gitignore
+
+# Vérifier qu'il n'est pas suivi par Git
+git check-ignore .env && echo "✅ .env est ignoré par Git" || echo "❌ .env n'est PAS ignoré !"
 ```
 
 ### 4. Installer le service systemd (recommandé)
@@ -138,6 +404,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
 pip install -r requirements.txt
+pip install -e .  # installe la commande 'cryptobot' / 'cb'
 ```
 
 ### 4. Configurer l'environnement
@@ -171,6 +438,20 @@ python -m cryptobot.cli.live --config configs/live.frugal.yaml --provider ccxt
 ```bash
 source .venv/bin/activate
 python -m cryptobot.cli.live_hyperliquid --config configs/live.hyperliquid.yaml
+```
+
+#### Option D : Interface interactive (recommandé)
+
+```bash
+source .venv/bin/activate
+pip install -e .  # s'assure que les entrypoints CLI sont installés
+cryptobot
+# ou
+cb
+
+# Exemples dans l'interface
+[CryptoBot@Hyperliquid:STOPPED] > start --config configs/live.hyperliquid.yaml
+[CryptoBot@Hyperliquid:ACTIVE] > monitor --trades 20 --refresh 3 --insights --live
 ```
 
 ---
@@ -243,27 +524,60 @@ nano configs/mon-config.yaml
 
 ## Dépannage
 
+### Erreur "Permission denied (publickey)" lors du clone Git
+
+**Problème :** Vous essayez de cloner avec SSH (`git@github.com:...`) mais votre VPS n'a pas de clé SSH configurée.
+
+**Solution :** Utilisez HTTPS à la place (plus simple, pas besoin de configuration) :
+
+```bash
+# Utilisez HTTPS au lieu de SSH
+git clone https://github.com/jossdip/CryptoBot.git
+
+# OU dans le script setup_vps.sh
+./setup_vps.sh https://github.com/jossdip/CryptoBot.git main
+```
+
+**Optionnel :** Si vous voulez configurer SSH (plus pratique à long terme) :
+
+```bash
+# 1. Générer une clé SSH sur votre VPS
+ssh-keygen -t ed25519 -C "vps-cryptobot"
+# Appuyez sur Entrée pour accepter les valeurs par défaut
+
+# 2. Afficher la clé publique
+cat ~/.ssh/id_ed25519.pub
+
+# 3. Copier cette clé et l'ajouter sur GitHub :
+#    - Allez sur https://github.com/settings/keys
+#    - Cliquez "New SSH key"
+#    - Collez la clé et sauvegardez
+
+# 4. Maintenant vous pouvez utiliser SSH
+git clone git@github.com:jossdip/CryptoBot.git
+```
+
 ### Erreur "No such file or directory" pour deploy/setup_vps.sh
 
 **Problème :** Vous essayez d'exécuter `./deploy/setup_vps.sh` mais le fichier n'existe pas encore sur le VPS.
 
 **Solution :** Utilisez l'une des méthodes suivantes :
 
-**Méthode 1 : Télécharger le script depuis GitHub**
+**Méthode 1 : Télécharger le script depuis GitHub (HTTPS)**
 ```bash
-curl -o setup_vps.sh https://raw.githubusercontent.com/votre-username/CryptoBot/main/deploy/setup_vps.sh
+curl -o setup_vps.sh https://raw.githubusercontent.com/jossdip/CryptoBot/main/deploy/setup_vps.sh
 chmod +x setup_vps.sh
-./setup_vps.sh git@github.com:votre-username/CryptoBot.git main
+./setup_vps.sh https://github.com/jossdip/CryptoBot.git main
 ```
 
-**Méthode 2 : Installation manuelle complète**
+**Méthode 2 : Installation manuelle complète (HTTPS)**
 ```bash
 # Installer les dépendances
 sudo apt update && sudo apt -y install git python3 python3-venv python3-pip
 
-# Cloner le repo
+# Cloner le repo avec HTTPS (plus simple, pas besoin de clé SSH)
 cd ~
-git clone git@github.com:votre-username/CryptoBot.git
+git clone https://github.com/jossdip/CryptoBot.git
 cd CryptoBot
 
 # Installer Python
@@ -324,25 +638,29 @@ sudo systemctl enable cryptobot-paper@$(whoami)
 # 1. Se connecter au VPS
 ssh user@vps-ip
 
-# 2. Télécharger et installer (automatique)
-curl -o setup_vps.sh https://raw.githubusercontent.com/votre-username/CryptoBot/main/deploy/setup_vps.sh
+# 2. Télécharger et installer (automatique - HTTPS, pas besoin de clé SSH)
+curl -o setup_vps.sh https://raw.githubusercontent.com/jossdip/CryptoBot/main/deploy/setup_vps.sh
 chmod +x setup_vps.sh
-./setup_vps.sh git@github.com:votre-username/CryptoBot.git main
+./setup_vps.sh https://github.com/jossdip/CryptoBot.git main
 
 # 3. Configurer vos clés
 nano ~/CryptoBot/.env  # Remplir vos clés
 
-# 4. Installer le service systemd
+# 4. Lancer l'interface interactive
+cd ~/CryptoBot && source .venv/bin/activate
+cryptobot  # ou 'cb'
+
+# 5. Installer le service systemd (optionnel)
 cd ~/CryptoBot
 sudo ./deploy/install_service.sh paper
 
-# 5. Vérifier que ça tourne
+# 6. Vérifier que ça tourne
 sudo journalctl -u cryptobot-paper@$(whoami) -f
 ```
 
 **C'est tout ! Le bot tourne maintenant en arrière-plan et redémarre automatiquement.**
 
-**Note :** Si vous n'avez pas encore pushé le repo sur GitHub, utilisez l'**Option B (Installation manuelle)** ci-dessus.
+**Note :** Utilisez HTTPS (`https://github.com/...`) au lieu de SSH (`git@github.com:...`) si vous n'avez pas configuré de clé SSH sur votre VPS.
 
 ---
 

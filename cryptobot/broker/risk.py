@@ -13,11 +13,17 @@ class RiskManager:
         return max(0.0, equity * float(self.cfg.max_position_pct))
 
     def additional_qty_allowed(self, equity: float, price: float, current_qty: float, leverage: float = 1.0) -> float:
-        # No position size limit (similar to nof1.ai approach)
-        # Only limited by available margin for leverage
+        # Enforce both leverage and max_position_pct constraints.
+        # Cap is the stricter of:
+        #  - leverage-based notional limit (equity * leverage)
+        #  - risk-based notional limit (equity * max_position_pct * leverage)
         lev = max(1.0, float(leverage))
-        # Maximum notional = available equity * leverage
-        max_notional = equity * lev
-        current_notional = abs(current_qty) * price
+        if price <= 0:
+            return 0.0
+
+        current_notional = abs(float(current_qty)) * float(price)
+        leverage_cap = float(equity) * lev
+        risk_cap = float(self.max_position_value(float(equity))) * lev
+        max_notional = min(leverage_cap, risk_cap)
         available_notional = max(0.0, max_notional - current_notional)
-        return available_notional / price if price > 0 else 0.0
+        return available_notional / float(price)
