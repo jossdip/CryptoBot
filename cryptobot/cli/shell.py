@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.formatted_text import ANSI
 from rich.console import Console
 
 from cryptobot.cli.prompt import build_prompt
@@ -72,7 +73,7 @@ class InteractiveShell:
                 # Mettre l'animation en pause pendant la saisie pour éviter tout flicker
                 pause_animated_logo()
                 try:
-                    line = self._session.prompt(prompt, completer=completer)
+                    line = self._session.prompt(ANSI(prompt), completer=completer)
                 finally:
                     resume_animated_logo()
             except (EOFError, KeyboardInterrupt):
