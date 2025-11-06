@@ -9,11 +9,12 @@ import time
 from loguru import logger as log
 
 try:  # optional dependency; only required when using Hyperliquid live
-    # The actual package name/import path may vary depending on SDK version
-    # This code defers import errors until runtime usage
-    from hyperliquid_python_sdk import Client as HyperliquidClient  # type: ignore
+    # Prefer official SDK import path from 'hyperliquid-python-sdk'
+    from hyperliquid.exchange import Exchange as HyperliquidClient  # type: ignore
+    from hyperliquid.info import Chain  # type: ignore
 except Exception:  # pragma: no cover - import is optional
     HyperliquidClient = None  # type: ignore[assignment]
+    Chain = None  # type: ignore[assignment]
 
 
 @dataclass
@@ -52,7 +53,7 @@ class HyperliquidBroker:
             else os.getenv("HYPERLIQUID_LIVE_URL", "https://api.hyperliquid.xyz")
         )
 
-        if HyperliquidClient is None:
+        if HyperliquidClient is None or Chain is None:
             raise RuntimeError(
                 "Hyperliquid Python SDK is not installed. Please install 'hyperliquid-python-sdk'."
             )
@@ -63,10 +64,12 @@ class HyperliquidBroker:
             private_key=private_key,
             testnet=testnet,
         )
+        chain = Chain.Testnet if self.conn.testnet else Chain.Mainnet
         self.client = HyperliquidClient(
+            secret_key=self.conn.private_key,
+            account_address=self.conn.wallet_address,
             base_url=self.conn.base_url,
-            wallet_address=self.conn.wallet_address,
-            private_key=self.conn.private_key,
+            chain=chain,
         )
 
         log.info(
