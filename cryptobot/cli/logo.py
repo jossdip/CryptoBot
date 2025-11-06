@@ -39,6 +39,7 @@ class AnimatedLogo:
         self._frame_index = 0
         self._dollar_index = 0
         self._logo_height = len(LOGO.split('\n'))
+        self._pause_event = threading.Event()  # when set => paused
         
     def _get_animated_logo(self) -> str:
         """Retourne le logo avec des dollars animés."""
@@ -110,6 +111,10 @@ class AnimatedLogo:
     def _animation_loop(self) -> None:
         """Boucle d'animation dans un thread séparé."""
         while self._running:
+            if self._pause_event.is_set():
+                # En pause: ne pas redessiner, dormir court
+                time.sleep(0.1)
+                continue
             self._frame_index += 1
             self._dollar_index += 1
             self._render_logo()
@@ -130,6 +135,15 @@ class AnimatedLogo:
         self._running = False
         if self._thread:
             self._thread.join(timeout=1.0)
+    
+    def pause(self) -> None:
+        """Met l'animation en pause (ne redessine plus)."""
+        self._pause_event.set()
+    
+    def resume(self) -> None:
+        """Reprend l'animation."""
+        if self._running:
+            self._pause_event.clear()
     
     def refresh(self) -> None:
         """Force un rafraîchissement du logo."""
@@ -160,6 +174,7 @@ def stop_animated_logo() -> None:
     global _animated_logo
     if _animated_logo:
         _animated_logo.stop()
+        _animated_logo = None
 
 
 def refresh_animated_logo() -> None:
@@ -167,5 +182,19 @@ def refresh_animated_logo() -> None:
     global _animated_logo
     if _animated_logo:
         _animated_logo.refresh()
+
+
+def pause_animated_logo() -> None:
+    """Met en pause l'animation du logo (utile pendant la saisie utilisateur)."""
+    global _animated_logo
+    if _animated_logo:
+        _animated_logo.pause()
+
+
+def resume_animated_logo() -> None:
+    """Reprend l'animation du logo après une pause."""
+    global _animated_logo
+    if _animated_logo:
+        _animated_logo.resume()
 
 

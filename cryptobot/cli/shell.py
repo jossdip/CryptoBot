@@ -12,7 +12,13 @@ from prompt_toolkit.history import InMemoryHistory
 from rich.console import Console
 
 from cryptobot.cli.prompt import build_prompt
-from cryptobot.cli.logo import start_animated_logo, refresh_animated_logo, stop_animated_logo
+from cryptobot.cli.logo import (
+    start_animated_logo,
+    refresh_animated_logo,
+    stop_animated_logo,
+    pause_animated_logo,
+    resume_animated_logo,
+)
 from cryptobot.cli.commands.monitor import MonitorCommand
 from cryptobot.cli.commands.config import ConfigCommand
 from cryptobot.cli.commands.base import Command
@@ -63,7 +69,12 @@ class InteractiveShell:
         while True:
             try:
                 prompt = build_prompt(exchange=exchange, status=self._status, fmt=getattr(getattr(cfg, "cli", None), "prompt_format", "[C4$H@{exchange}:{status}] > "))
-                line = self._session.prompt(prompt, completer=completer)
+                # Mettre l'animation en pause pendant la saisie pour éviter tout flicker
+                pause_animated_logo()
+                try:
+                    line = self._session.prompt(prompt, completer=completer)
+                finally:
+                    resume_animated_logo()
             except (EOFError, KeyboardInterrupt):
                 self.console.print("Exiting...")
                 stop_animated_logo()
@@ -126,10 +137,19 @@ class InteractiveShell:
 
             handler = self._commands.get(cmd)
             if handler is not None:
+                # Pause animation pendant les sous-menus interactifs
+                pause_animated_logo()
                 try:
-                    handler.run(args)
-                except Exception as e:
-                    self.console.print(f"[red]Command error:[/red] {e}")
+                    try:
+                        handler.run(args)
+                    except KeyboardInterrupt:
+                        self.console.print("[yellow]Commande annulée.[/yellow]")
+                    except EOFError:
+                        self.console.print("[yellow]Retour.[/yellow]")
+                finally:
+                    resume_animated_logo()
+                # Gestion des erreurs classiques
+                # (les KeyboardInterrupt/EOFError sont gérées ci-dessus)
                 continue
 
             self.console.print(f"Unknown command: {cmd}")
