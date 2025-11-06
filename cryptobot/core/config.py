@@ -44,7 +44,7 @@ class RiskConfig(BaseModel):
 
 
 class StrategyConfig(BaseModel):
-    name: str
+    name: str = "nof1_baseline"
     params: Dict[str, float] = Field(default_factory=dict)
 
 
@@ -129,8 +129,8 @@ class AppConfig(BaseModel):
     data: DataConfig
     broker: BrokerConfig
     risk: RiskConfig
-    strategy: StrategyConfig
-    ensemble: EnsembleConfig
+    strategy: StrategyConfig = Field(default_factory=StrategyConfig)
+    ensemble: EnsembleConfig = Field(default_factory=EnsembleConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     # Optional sections for Hyperliquid/LLM live trading
     hyperliquid: HyperliquidConfig = Field(default_factory=HyperliquidConfig)

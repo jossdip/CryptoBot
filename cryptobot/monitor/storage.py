@@ -20,6 +20,7 @@ class StorageManager:
       - portfolio_snapshots
       - llm_decisions
       - performance_metrics
+      - weights_history
     """
 
     def __init__(self, db_path: str = "~/.cryptobot/monitor.db") -> None:
@@ -87,6 +88,19 @@ class StorageManager:
                     sharpe REAL,
                     max_drawdown REAL,
                     metadata TEXT
+                );
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS weights_history (
+                    timestamp REAL,
+                    market_making REAL,
+                    momentum REAL,
+                    scalping REAL,
+                    arbitrage REAL,
+                    breakout REAL,
+                    sniping REAL
                 );
                 """
             )
@@ -210,6 +224,58 @@ class StorageManager:
                     json.dumps(metadata or {}),
                 ),
             )
+
+    def record_weights(
+        self,
+        *,
+        timestamp: float,
+        weights: Dict[str, float],
+    ) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO weights_history (timestamp, market_making, momentum, scalping, arbitrage, breakout, sniping)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    float(timestamp),
+                    float(weights.get("market_making", 0.35)),
+                    float(weights.get("momentum", 0.25)),
+                    float(weights.get("scalping", 0.15)),
+                    float(weights.get("arbitrage", 0.12)),
+                    float(weights.get("breakout", 0.08)),
+                    float(weights.get("sniping", 0.05)),
+                ),
+            )
+
+    def latest_weights(self) -> Optional[Dict[str, float]]:
+        row = self._conn.execute(
+            "SELECT market_making, momentum, scalping, arbitrage, breakout, sniping FROM weights_history ORDER BY timestamp DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "market_making": float(row[0]),
+            "momentum": float(row[1]),
+            "scalping": float(row[2]),
+            "arbitrage": float(row[3]),
+            "breakout": float(row[4]),
+            "sniping": float(row[5]),
+        }
+
+    def recent_performance(self, limit: int = 200) -> List[Dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT timestamp, strategy, pnl FROM performance_metrics ORDER BY timestamp DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            out.append({
+                "timestamp": float(r[0]),
+                "strategy": str(r[1]),
+                "pnl": float(r[2]),
+            })
+        return out
 
     # Query helpers
     def recent_trades(self, limit: int = 10, *, strategy: Optional[str] = None, symbol: Optional[str] = None) -> List[Dict[str, Any]]:

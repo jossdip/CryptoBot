@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import argparse
 from typing import Dict, Any
+import os
 
 from cryptobot.core.config import AppConfig
 from cryptobot.core.logging import get_logger, setup_logging
@@ -32,6 +33,19 @@ def run_live(config_path: str) -> None:
 
     log.info("Starting Hyperliquid live runner...")
     mode_manager = ModeManager(cfg)
+
+    # Startup safety checks: require LLM and exchange keys
+    if bool(getattr(cfg.llm, "enabled", True)):
+        if not os.getenv("LLM_API_KEY", "").strip():
+            raise RuntimeError(
+                "LLM_API_KEY is missing. Create ~/.cryptobot/.env or ./.env with LLM_API_KEY and restart."
+            )
+    if not mode_manager.wallet_address or not mode_manager.private_key:
+        raise RuntimeError(
+            "Hyperliquid keys missing. Set HYPERLIQUID_WALLET_ADDRESS and "
+            + ("HYPERLIQUID_TESTNET_PRIVATE_KEY" if mode_manager.is_testnet() else "HYPERLIQUID_LIVE_PRIVATE_KEY")
+            + ". See docs/ENV_HYPERLIQUID_EXAMPLE.txt."
+        )
     broker = HyperliquidBroker(
         wallet_address=mode_manager.wallet_address,
         private_key=mode_manager.private_key,
@@ -41,6 +55,24 @@ def run_live(config_path: str) -> None:
     llm_client = LLMClient.from_env()
     orchestrator = LLMOrchestrator(llm_client)
     weight_manager = WeightManager()
+
+    # Seed initial weights from configuration if provided
+    try:
+        init_w = getattr(getattr(cfg, "strategy_weights", None), "initial_weights", None)
+        if isinstance(init_w, dict) and init_w:
+            from cryptobot.llm.orchestrator import StrategyWeight
+            sw = StrategyWeight(
+                market_making=float(init_w.get("market_making", 0.35)),
+                momentum=float(init_w.get("momentum", 0.25)),
+                scalping=float(init_w.get("scalping", 0.15)),
+                arbitrage=float(init_w.get("arbitrage", 0.12)),
+                breakout=float(init_w.get("breakout", 0.08)),
+                sniping=float(init_w.get("sniping", 0.05)),
+            )
+            sw.normalize()
+            orchestrator.weights = sw
+    except Exception:
+        pass
 
     # Strategy instances (trading strategies only)
     strategies = {
@@ -83,6 +115,34 @@ def run_live(config_path: str) -> None:
             if monitor_engine
             else None
         )
+        # Load latest persisted weights to warm start
+        try:
+            latest = monitor_engine.storage.latest_weights()
+            if latest:
+                from cryptobot.llm.orchestrator import StrategyWeight
+                sw = StrategyWeight(
+                    market_making=float(latest.get("market_making", orchestrator.weights.market_making)),
+                    momentum=float(latest.get("momentum", orchestrator.weights.momentum)),
+                    scalping=float(latest.get("scalping", orchestrator.weights.scalping)),
+                    arbitrage=float(latest.get("arbitrage", orchestrator.weights.arbitrage)),
+                    breakout=float(latest.get("breakout", orchestrator.weights.breakout)),
+                    sniping=float(latest.get("sniping", orchestrator.weights.sniping)),
+                )
+                sw.normalize()
+                orchestrator.weights = sw
+        except Exception:
+            pass
+        # Warm performance history from persisted metrics
+        try:
+            perf_rows = monitor_engine.storage.recent_performance(limit=200)
+            for r in reversed(perf_rows):
+                orchestrator.performance_history.append({
+                    "strategy": r.get("strategy", "unknown"),
+                    "pnl": float(r.get("pnl", 0.0)),
+                    "timestamp": float(r.get("timestamp", 0.0)),
+                })
+        except Exception:
+            pass
         monitor_engine.start()
     
     # Optimisation coûts: tracking pour allocation et budget
@@ -159,6 +219,22 @@ def run_live(config_path: str) -> None:
                     performance_metrics=performance_tracker.feed_to_llm(),
                 )
                 last_allocation_ts = current_time
+                # Persist new weights for future warm start
+                try:
+                    if monitor_engine:
+                        monitor_engine.storage.record_weights(
+                            timestamp=current_time,
+                            weights={
+                                "market_making": float(weights.market_making),
+                                "momentum": float(weights.momentum),
+                                "scalping": float(weights.scalping),
+                                "arbitrage": float(weights.arbitrage),
+                                "breakout": float(weights.breakout),
+                                "sniping": float(weights.sniping),
+                            },
+                        )
+                except Exception:
+                    pass
             else:
                 # Réutiliser les poids précédents
                 weights = orchestrator.weights

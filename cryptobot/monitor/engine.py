@@ -116,21 +116,41 @@ class MonitorEngine:
     def _collect_once(self) -> None:
         # Portfolio snapshot
         try:
-            portfolio = self.broker.get_portfolio()
-            positions_dict: Dict[str, Any] = {}
-            for sym, pos in portfolio.positions.items():
-                positions_dict[sym] = {
-                    "symbol": getattr(pos, "symbol", sym),
-                    "qty": float(getattr(pos, "qty", 0.0)),
-                    "avg_price": float(getattr(pos, "avg_price", 0.0)),
-                }
-            equity = float(getattr(portfolio, "equity", lambda: 0.0)() if callable(getattr(portfolio, "equity", None)) else getattr(portfolio, "cash", 0.0))
+            raw = self.broker.get_portfolio()
+            # Normalize dictionary-like responses
+            portfolio = raw.get("response", raw) if isinstance(raw, dict) else raw
+
+            # Extract balance/equity/unrealized PnL best-effort
+            def _num(*keys: str, default: float = 0.0) -> float:
+                cur = portfolio
+                for k in keys:
+                    if isinstance(cur, dict) and k in cur:
+                        cur = cur[k]
+                    else:
+                        return default
+                try:
+                    return float(cur)
+                except Exception:
+                    return default
+
+            balance = _num("balance", default=_num("cash", default=0.0))
+            equity = _num("equity", default=balance)
+            unrealized = _num("unrealized_pnl", default=_num("unrealizedPnl", default=0.0))
+
+            # Positions: store as-is if we find a positions-like key; else store whole portfolio
+            positions_obj: Any = None
+            for k in ("positions", "openPositions", "positionsMap", "perpPositions"):
+                if isinstance(portfolio, dict) and k in portfolio:
+                    positions_obj = portfolio[k]
+                    break
+            positions_dict: Dict[str, Any] = positions_obj if isinstance(positions_obj, dict) else {"data": positions_obj} if positions_obj is not None else (portfolio if isinstance(portfolio, dict) else {})
+
             self.storage.record_portfolio_snapshot(
                 timestamp=time.time(),
-                balance=float(getattr(portfolio, "cash", 0.0)),
-                equity=equity,
-                unrealized_pnl=float(getattr(portfolio, "unrealized_pnl", 0.0)),
-                positions=positions_dict,
+                balance=float(balance),
+                equity=float(equity),
+                unrealized_pnl=float(unrealized),
+                positions=positions_dict or {},
             )
         except Exception:
             pass

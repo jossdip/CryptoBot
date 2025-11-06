@@ -22,6 +22,9 @@ class MomentumStrategy:
         twitter = float(sentiment.get("twitter", {}).get("score", 0.0))
         bias = reddit + twitter
         direction = "long" if bias >= 0 else "short"
-        return [{"symbol": symbol, "price": mid, "bias": bias, "direction": direction}]
+        # Include recent price change pct for upstream scoring filters
+        pcp_map: Dict[str, float] = context.get("price_change_pct", {})
+        pcp = float(pcp_map.get(symbol, 0.0))
+        return [{"symbol": symbol, "price": mid, "bias": bias, "direction": direction, "price_change_pct": pcp}]
 
 

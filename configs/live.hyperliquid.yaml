@@ -86,3 +86,21 @@ monitor:
   retention_days: 30
   llm_insights_enabled: true
 
+# Default strategy/ensemble to satisfy configuration schema for interactive CLI
+strategy:
+  name: nof1_baseline
+  params:
+    rsi_period: 14
+    rsi_buy: 30
+    rsi_sell: 70
+    ema_fast: 12
+    ema_slow: 26
+    atr_period: 14
+    volatility_floor: 0.002
+
+ensemble:
+  weights:
+    nof1_baseline: 1.0
+  llm_overlay:
+    enabled: false
+

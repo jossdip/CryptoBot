@@ -8,9 +8,20 @@ if ! command -v python &>/dev/null; then
   exit 1
 fi
 
-echo "Installing package in editable mode (pip install -e .)"
-python -m pip install -e .
+if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+  echo "Detected virtualenv: $VIRTUAL_ENV"
+  echo "Installing package in editable mode into venv (pip install -e .)"
+  python -m pip install -e .
+else
+  echo "No virtualenv detected. Installing for current user (pip install --user -e .)"
+  python -m pip install --user -e .
+  BIN_DIR="$HOME/.local/bin"
+  if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
+    echo "\n[Hint] Add $BIN_DIR to your PATH to use 'cryptobot'/'cb' without activating a venv:"
+    echo "  echo 'export PATH=\"$BIN_DIR:$PATH\"' >> ~/.bashrc && source ~/.bashrc"
+  fi
+fi
 
-echo "Done. You can run:\n  - cryptobot\n  - cb"
+echo -e "Done. You can run:\n  - cryptobot\n  - cb"
 
 
