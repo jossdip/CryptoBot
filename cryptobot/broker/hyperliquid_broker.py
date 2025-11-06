@@ -11,10 +11,9 @@ from loguru import logger as log
 try:  # optional dependency; only required when using Hyperliquid live
     # Prefer official SDK import path from 'hyperliquid-python-sdk'
     from hyperliquid.exchange import Exchange as HyperliquidClient  # type: ignore
-    from hyperliquid.info import Chain  # type: ignore
-except Exception:  # pragma: no cover - import is optional
+except Exception as _e:  # pragma: no cover - import is optional
     HyperliquidClient = None  # type: ignore[assignment]
-    Chain = None  # type: ignore[assignment]
+    _HL_IMPORT_ERR = _e  # type: ignore[assignment]
 
 
 @dataclass
@@ -53,7 +52,7 @@ class HyperliquidBroker:
             else os.getenv("HYPERLIQUID_LIVE_URL", "https://api.hyperliquid.xyz")
         )
 
-        if HyperliquidClient is None or Chain is None:
+        if HyperliquidClient is None:
             raise RuntimeError(
                 "Hyperliquid Python SDK is not installed. Please install 'hyperliquid-python-sdk'."
             )
@@ -64,13 +63,42 @@ class HyperliquidBroker:
             private_key=private_key,
             testnet=testnet,
         )
-        chain = Chain.Testnet if self.conn.testnet else Chain.Mainnet
-        self.client = HyperliquidClient(
-            secret_key=self.conn.private_key,
-            account_address=self.conn.wallet_address,
-            base_url=self.conn.base_url,
-            chain=chain,
-        )
+        # SDK signatures vary by version; try a few known argument sets
+        client = None
+        last_error: Exception | None = None
+        for kwargs in (
+            {
+                "secret_key": self.conn.private_key,
+                "account_address": self.conn.wallet_address,
+                "base_url": self.conn.base_url,
+            },
+            {
+                "key": self.conn.private_key,
+                "account_address": self.conn.wallet_address,
+                "base_url": self.conn.base_url,
+            },
+            {
+                "secret_key": self.conn.private_key,
+                "account_address": self.conn.wallet_address,
+                "base_url_http": self.conn.base_url,
+            },
+            {
+                "key": self.conn.private_key,
+                "account_address": self.conn.wallet_address,
+                "base_url_http": self.conn.base_url,
+            },
+        ):
+            try:
+                client = HyperliquidClient(**kwargs)  # type: ignore[arg-type]
+                break
+            except TypeError as e:
+                last_error = e
+                continue
+        if client is None:
+            raise RuntimeError(
+                f"Failed to initialize Hyperliquid Exchange client. Last error: {last_error}"
+            )
+        self.client = client
 
         log.info(
             f"Initialized HyperliquidBroker (testnet={self.conn.testnet}) at {self.conn.base_url}"
