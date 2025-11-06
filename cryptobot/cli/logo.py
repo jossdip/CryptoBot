@@ -83,18 +83,23 @@ class AnimatedLogo:
             # Sauvegarder la position du curseur
             sys.stdout.write('\x1b[s')  # Save cursor position
             sys.stdout.flush()
-            
-            # Aller en haut du terminal
-            sys.stdout.write('\x1b[H')  # Move cursor to home position
-            
-            # Effacer depuis le curseur jusqu'à la fin de l'écran
-            sys.stdout.write('\x1b[J')  # Clear from cursor to end of screen
-            
-            # Afficher le logo animé avec des codes ANSI cyan
-            animated_logo = self._get_animated_logo()
-            # Écrire directement dans stdout pour éviter les problèmes avec print
-            sys.stdout.write(f"\x1b[36m{animated_logo}\x1b[0m")
-            
+
+            # Calculer les lignes du logo animé
+            lines = self._get_animated_logo().split('\n')
+
+            # Rafraîchir uniquement la zone du logo (ligne 1 -> hauteur du logo)
+            # Sans effacer le reste de l'écran pour ne pas perturber le prompt
+            for idx, line in enumerate(lines, start=1):
+                # Placer le curseur au début de la ligne idx
+                sys.stdout.write(f'\x1b[{idx};1H')
+                # Effacer la ligne entière
+                sys.stdout.write('\x1b[2K')
+                # Écrire la ligne du logo (en cyan) si non vide
+                if line:
+                    sys.stdout.write('\x1b[36m')
+                    sys.stdout.write(line)
+                    sys.stdout.write('\x1b[0m')
+
             # Restaurer la position du curseur
             sys.stdout.write('\x1b[u')  # Restore cursor position
             sys.stdout.flush()

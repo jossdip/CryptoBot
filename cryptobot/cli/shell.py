@@ -32,8 +32,15 @@ class InteractiveShell:
         self._running_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._register_commands()
-        # Démarrer l'animation du logo
-        start_animated_logo()
+        # Démarrer l'animation du logo si activée dans la config
+        cfg = self.context.get("config")
+        logo_enabled = True
+        try:
+            logo_enabled = bool(getattr(getattr(cfg, "cli", None), "logo_enabled", True))
+        except Exception:
+            logo_enabled = True
+        if logo_enabled:
+            start_animated_logo()
 
     def _register_commands(self) -> None:
         # Built-ins
