@@ -1,0 +1,54 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install pytest
+
+      - name: Run tests
+        run: pytest -q
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to VPS over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          # Optional: set port via secret VPS_PORT (defaults to 22 if unset)
+          # port: ${{ secrets.VPS_PORT }}
+          # Optional: enforce host key check with `ssh-keyscan -H <host>` stored in VPS_SSH_KNOWN_HOSTS
+          # host_key: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          script: |
+            set -euo pipefail
+            cd "${{ secrets.VPS_DIR }}"
+            bash ./deploy/update_ci.sh
+
+

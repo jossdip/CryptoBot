@@ -11,7 +11,7 @@ git pull --ff-only || true
 source .venv/bin/activate
 pip install -r requirements.txt || true
 
-sudo systemctl restart "cryptobot-${SERVICE}@${USER}"
-sudo systemctl status "cryptobot-${SERVICE}@${USER}" --no-pager || true
+sudo -n systemctl restart "cryptobot-${SERVICE}@${USER}"
+sudo -n systemctl status "cryptobot-${SERVICE}@${USER}" --no-pager || true
 
 
