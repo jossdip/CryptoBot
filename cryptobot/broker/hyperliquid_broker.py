@@ -15,6 +15,11 @@ except Exception as _e:  # pragma: no cover - import is optional
     HyperliquidClient = None  # type: ignore[assignment]
     _HL_IMPORT_ERR = _e  # type: ignore[assignment]
 try:
+    # Build a signing wallet from a private key
+    from eth_account import Account  # type: ignore
+except Exception as _e:
+    Account = None  # type: ignore[assignment]
+try:
     # Chain is optional; use if available to signal testnet/mainnet
     from hyperliquid.info import Chain as _HLChain  # type: ignore
 except Exception:
@@ -68,42 +73,35 @@ class HyperliquidBroker:
             private_key=private_key,
             testnet=testnet,
         )
-        # SDK signatures vary by version; try several known combinations
-        client = None
-        last_error: Exception | None = None
-        chain_arg = None
-        if _HLChain is not None:
-            chain_arg = _HLChain.Testnet if self.conn.testnet else _HLChain.Mainnet
-        attempts: list[tuple[str, tuple, dict]] = []
-        if chain_arg is not None:
-            attempts.extend([
-                ("pos", (self.conn.wallet_address, self.conn.private_key), {"chain": chain_arg}),
-                ("kw", (), {"account_address": self.conn.wallet_address, "secret_key": self.conn.private_key, "chain": chain_arg}),
-                ("pos", (self.conn.wallet_address, self.conn.private_key), {"base_url": self.conn.base_url, "chain": chain_arg}),
-                ("kw", (), {"account_address": self.conn.wallet_address, "secret_key": self.conn.private_key, "base_url": self.conn.base_url, "chain": chain_arg}),
-            ])
-        attempts.extend([
-            ("pos", (self.conn.wallet_address, self.conn.private_key), {"base_url": self.conn.base_url}),
-            ("kw", (), {"account_address": self.conn.wallet_address, "secret_key": self.conn.private_key, "base_url": self.conn.base_url}),
-            ("pos", (self.conn.wallet_address, self.conn.private_key), {}),
-            ("kw", (), {"account_address": self.conn.wallet_address, "secret_key": self.conn.private_key}),
-        ])
-        for mode, args, kwargs in attempts:
-            try:
-                if mode == "pos":
-                    client = HyperliquidClient(*args, **kwargs)  # type: ignore[misc]
-                else:
-                    client = HyperliquidClient(**kwargs)  # type: ignore[misc]
-                break
-            except TypeError as e:
-                last_error = e
-                continue
-            except Exception as e:
-                last_error = e
-                continue
-        if client is None:
-            raise RuntimeError(f"Failed to initialize Hyperliquid Exchange client. Last error: {last_error}")
-        self.client = client
+        # Build LocalAccount wallet as required by SDK:
+        # Exchange.__init__(wallet: LocalAccount, base_url: Optional[str] = None, ..., account_address: Optional[str] = None, ...)
+        if Account is None:
+            raise RuntimeError("eth-account is missing. Please reinstall 'hyperliquid-python-sdk'.")
+        try:
+            # Clean potential surrounding quotes/whitespace
+            pk = str(self.conn.private_key).strip().strip('"').strip("'")
+            wallet_obj = Account.from_key(pk)  # LocalAccount
+        except Exception as e:
+            raise RuntimeError(f"Invalid Hyperliquid private key: {e}")
+        # Warn if provided wallet address mismatches derived address
+        try:
+            if self.conn.wallet_address and self.conn.wallet_address.lower() != wallet_obj.address.lower():
+                log.warning(
+                    f"Provided wallet address {self.conn.wallet_address} differs from private key address {wallet_obj.address}. "
+                    "Using the derived address for signing; API may still accept provided account_address."
+                )
+        except Exception:
+            pass
+        # Initialize client with wallet object and base_url; pass account_address for clarity
+        try:
+            self.client = HyperliquidClient(
+                wallet_obj,
+                base_url=self.conn.base_url,
+                account_address=self.conn.wallet_address or wallet_obj.address,
+            )
+        except TypeError:
+            # Fallback: without account_address
+            self.client = HyperliquidClient(wallet_obj, base_url=self.conn.base_url)
 
         log.info(
             f"Initialized HyperliquidBroker (testnet={self.conn.testnet}) at {self.conn.base_url}"
