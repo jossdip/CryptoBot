@@ -14,6 +14,11 @@ try:  # optional dependency; only required when using Hyperliquid live
 except Exception as _e:  # pragma: no cover - import is optional
     HyperliquidClient = None  # type: ignore[assignment]
     _HL_IMPORT_ERR = _e  # type: ignore[assignment]
+try:
+    # Chain is optional; use if available to signal testnet/mainnet
+    from hyperliquid.info import Chain as _HLChain  # type: ignore
+except Exception:
+    _HLChain = None  # type: ignore[assignment]
 
 
 @dataclass
@@ -63,41 +68,41 @@ class HyperliquidBroker:
             private_key=private_key,
             testnet=testnet,
         )
-        # SDK signatures vary by version; try a few known argument sets
+        # SDK signatures vary by version; try several known combinations
         client = None
         last_error: Exception | None = None
-        for kwargs in (
-            {
-                "secret_key": self.conn.private_key,
-                "account_address": self.conn.wallet_address,
-                "base_url": self.conn.base_url,
-            },
-            {
-                "key": self.conn.private_key,
-                "account_address": self.conn.wallet_address,
-                "base_url": self.conn.base_url,
-            },
-            {
-                "secret_key": self.conn.private_key,
-                "account_address": self.conn.wallet_address,
-                "base_url_http": self.conn.base_url,
-            },
-            {
-                "key": self.conn.private_key,
-                "account_address": self.conn.wallet_address,
-                "base_url_http": self.conn.base_url,
-            },
-        ):
+        chain_arg = None
+        if _HLChain is not None:
+            chain_arg = _HLChain.Testnet if self.conn.testnet else _HLChain.Mainnet
+        attempts: list[tuple[str, tuple, dict]] = []
+        if chain_arg is not None:
+            attempts.extend([
+                ("pos", (self.conn.wallet_address, self.conn.private_key), {"chain": chain_arg}),
+                ("kw", (), {"account_address": self.conn.wallet_address, "secret_key": self.conn.private_key, "chain": chain_arg}),
+                ("pos", (self.conn.wallet_address, self.conn.private_key), {"base_url": self.conn.base_url, "chain": chain_arg}),
+                ("kw", (), {"account_address": self.conn.wallet_address, "secret_key": self.conn.private_key, "base_url": self.conn.base_url, "chain": chain_arg}),
+            ])
+        attempts.extend([
+            ("pos", (self.conn.wallet_address, self.conn.private_key), {"base_url": self.conn.base_url}),
+            ("kw", (), {"account_address": self.conn.wallet_address, "secret_key": self.conn.private_key, "base_url": self.conn.base_url}),
+            ("pos", (self.conn.wallet_address, self.conn.private_key), {}),
+            ("kw", (), {"account_address": self.conn.wallet_address, "secret_key": self.conn.private_key}),
+        ])
+        for mode, args, kwargs in attempts:
             try:
-                client = HyperliquidClient(**kwargs)  # type: ignore[arg-type]
+                if mode == "pos":
+                    client = HyperliquidClient(*args, **kwargs)  # type: ignore[misc]
+                else:
+                    client = HyperliquidClient(**kwargs)  # type: ignore[misc]
                 break
             except TypeError as e:
                 last_error = e
                 continue
+            except Exception as e:
+                last_error = e
+                continue
         if client is None:
-            raise RuntimeError(
-                f"Failed to initialize Hyperliquid Exchange client. Last error: {last_error}"
-            )
+            raise RuntimeError(f"Failed to initialize Hyperliquid Exchange client. Last error: {last_error}")
         self.client = client
 
         log.info(
