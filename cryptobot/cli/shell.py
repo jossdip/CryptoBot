@@ -264,6 +264,8 @@ class InteractiveShell:
             cfg_path = self.context.get("config_path") or "configs/live.hyperliquid.yaml"
             env = os.environ.copy()
             env["CRYPTOBOT_DISABLE_CONSOLE_LOG"] = "1"
+            # Enable in-process supervisor in the runner so it auto-restarts if it exits unexpectedly
+            env["CRYPTOBOT_AUTO_RESTART"] = "1"
             # Ensure monitor DB is the same between shells and runner if set
             # (uses existing CRYPTOBOT_MONITOR_DB env if provided)
             os.makedirs("logs", exist_ok=True)

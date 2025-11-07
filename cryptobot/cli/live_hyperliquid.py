@@ -28,7 +28,7 @@ from cryptobot.data.context_aggregator import MarketContextAggregator
 from cryptobot.monitor.storage import StorageManager
 
 
-def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> None:
+def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> bool:
     load_local_environment()
     cfg = AppConfig.load(config_path)
     setup_logging(level="INFO")
@@ -227,6 +227,7 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
     allocation_interval_sec = int(getattr(cfg.llm, "allocation_interval_sec", cfg.llm.decision_interval_sec))
     max_opportunities_per_cycle = int(getattr(cfg.llm, "max_opportunities_per_cycle", 999))
     min_opportunity_score = float(getattr(cfg.llm, "min_opportunity_score", 0.0))
+    budget_exceeded = False
 
     def _score_opportunity(opportunity: Dict[str, Any], strategy_name: str, context: Dict[str, Any]) -> float:
         """Score préalable d'une opportunité (0-1) avant appel LLM pour réduire coûts."""
@@ -287,13 +288,22 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
             except Exception:
                 pass
 
-            # Vérifier budget mensuel (si configuré)
+            # Vérifier budget mensuel (si configuré) — ne plus quitter; passer en mode budget_exceeded
             if monthly_budget_usd > 0.0:
-                stats = llm_client._cost_tracker.get_stats()
-                if stats["estimated_monthly_cost"] >= monthly_budget_usd:
-                    log.warning(f"Budget mensuel atteint: ${stats['estimated_monthly_cost']:.2f} >= ${monthly_budget_usd:.2f}")
-                    log.warning("Arrêt du bot pour éviter dépassement de budget")
-                    break
+                try:
+                    stats = llm_client._cost_tracker.get_stats()
+                    if float(stats.get("estimated_monthly_cost", 0.0)) >= monthly_budget_usd:
+                        if not budget_exceeded:
+                            log.warning(
+                                f"Budget mensuel atteint: ${float(stats.get('estimated_monthly_cost', 0.0)):.2f} >= ${monthly_budget_usd:.2f} — pause des appels LLM, maintien du heartbeat"
+                            )
+                        budget_exceeded = True
+                    else:
+                        if budget_exceeded:
+                            log.info("Budget sous le seuil à nouveau — reprise des appels LLM")
+                        budget_exceeded = False
+                except Exception:
+                    pass
             
             # 1. Gather market context
             context = context_aggregator.build_context(
@@ -304,105 +314,110 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
 
             # 2. LLM decides strategy weights (optimisé: moins fréquent)
             current_time = time.time()
-            if current_time - last_allocation_ts >= allocation_interval_sec:
-                weights = orchestrator.decide_strategy_allocation(
-                    market_data=context["market"],
-                    portfolio_state=context["portfolio"],
-                    sentiment_data=context.get("sentiment", {}),
-                    performance_metrics=performance_tracker.feed_to_llm(),
-                )
-                try:
-                    log.info(
-                        "Strategy allocation updated: "
-                        + ", ".join([
-                            f"{n}={getattr(weights, n):.2f}" for n in [
-                                "market_making","momentum","scalping","arbitrage","breakout","sniping"
-                            ]
-                        ])
-                    )
-                except Exception:
-                    pass
-                last_allocation_ts = current_time
-                # Persist new weights for future warm start
-                try:
-                    if monitor_engine:
-                        monitor_engine.storage.record_weights(
-                            timestamp=current_time,
-                            weights={
-                                "market_making": float(weights.market_making),
-                                "momentum": float(weights.momentum),
-                                "scalping": float(weights.scalping),
-                                "arbitrage": float(weights.arbitrage),
-                                "breakout": float(weights.breakout),
-                                "sniping": float(weights.sniping),
-                            },
-                        )
-                except Exception:
-                    pass
-            else:
-                # Réutiliser les poids précédents
+            if budget_exceeded:
+                # Pas d'appels LLM — réutiliser poids précédents
                 weights = orchestrator.weights
+            else:
+                if current_time - last_allocation_ts >= allocation_interval_sec:
+                    weights = orchestrator.decide_strategy_allocation(
+                        market_data=context["market"],
+                        portfolio_state=context["portfolio"],
+                        sentiment_data=context.get("sentiment", {}),
+                        performance_metrics=performance_tracker.feed_to_llm(),
+                    )
+                    try:
+                        log.info(
+                            "Strategy allocation updated: "
+                            + ", ".join([
+                                f"{n}={getattr(weights, n):.2f}" for n in [
+                                    "market_making","momentum","scalping","arbitrage","breakout","sniping"
+                                ]
+                            ])
+                        )
+                    except Exception:
+                        pass
+                    last_allocation_ts = current_time
+                    # Persist new weights for future warm start
+                    try:
+                        if monitor_engine:
+                            monitor_engine.storage.record_weights(
+                                timestamp=current_time,
+                                weights={
+                                    "market_making": float(weights.market_making),
+                                    "momentum": float(weights.momentum),
+                                    "scalping": float(weights.scalping),
+                                    "arbitrage": float(weights.arbitrage),
+                                    "breakout": float(weights.breakout),
+                                    "sniping": float(weights.sniping),
+                                },
+                            )
+                    except Exception:
+                        pass
+                else:
+                    # Réutiliser les poids précédents
+                    weights = orchestrator.weights
 
             # 3. Update weight manager
             weight_manager.weights = weights
 
             # 4. For each strategy (based on weights) - OPTIMISÉ pour réduire coûts
-            opportunities_processed = 0
-            for strategy_name, strategy_instance in strategies.items():
-                weight = float(getattr(weights, strategy_name, 0.0))
-                if weight < 0.05:
-                    continue
-                # Detect opportunities
-                detect_fn = getattr(strategy_instance, "detect_opportunities", None)
-                if detect_fn is None:
-                    continue
-                # All strategies use context (which includes all signals: Reddit, Twitter, Polymarket, market cap, volume, etc.)
-                opportunities = detect_fn(context)
-                try:
-                    log.debug(f"{strategy_name}: detected {len(opportunities)} opportunities before scoring")
-                except Exception:
-                    pass
-                
-                # OPTIMISATION: Filtrer et scorer les opportunités avant appel LLM
-                scored_opportunities = []
-                for opp in opportunities:
-                    score = _score_opportunity(opp, strategy_name, context)
-                    if score >= min_opportunity_score:
-                        scored_opportunities.append((score, opp))
-                
-                # Trier par score décroissant et limiter le nombre
-                scored_opportunities.sort(key=lambda x: x[0], reverse=True)
-                scored_opportunities = scored_opportunities[:max_opportunities_per_cycle]
-                try:
-                    log.debug(f"{strategy_name}: {len(scored_opportunities)} opportunities after scoring/filtering (processed cap {max_opportunities_per_cycle})")
-                except Exception:
-                    pass
-                
-                # Traiter les meilleures opportunités
-                for score, opportunity in scored_opportunities:
-                    if opportunities_processed >= max_opportunities_per_cycle:
-                        break
-                    opportunities_processed += 1
+            if not budget_exceeded:
+                opportunities_processed = 0
+                for strategy_name, strategy_instance in strategies.items():
+                    weight = float(getattr(weights, strategy_name, 0.0))
+                    if weight < 0.05:
+                        continue
+                    # Detect opportunities
+                    detect_fn = getattr(strategy_instance, "detect_opportunities", None)
+                    if detect_fn is None:
+                        continue
+                    # All strategies use context (which includes all signals: Reddit, Twitter, Polymarket, market cap, volume, etc.)
+                    opportunities = detect_fn(context)
+                    try:
+                        log.debug(f"{strategy_name}: detected {len(opportunities)} opportunities before scoring")
+                    except Exception:
+                        pass
                     
-                    # Appel LLM uniquement pour opportunités scorées
-                    decision = orchestrator.decide_trade(
-                        strategy_name=strategy_name,
-                        opportunity=opportunity,
-                        market_context=context,
-                    )
-                    if decision.get("execute") and float(decision.get("confidence", 0.0)) > 0.7:
-                        decision["symbol"] = opportunity.get("symbol", symbols[0])
-                        executor.execute_strategy(strategy_name, decision, weights)
-                        performance_tracker.record_trade_start(
-                            strategy=strategy_name,
-                            entry_price=float(opportunity.get("price", 0.0) or opportunity.get("mid", 0.0) or 0.0),
-                            size=float(decision.get("size_usd", 0.0)),
-                            symbol=decision["symbol"],
+                    # OPTIMISATION: Filtrer et scorer les opportunités avant appel LLM
+                    scored_opportunities = []
+                    for opp in opportunities:
+                        score = _score_opportunity(opp, strategy_name, context)
+                        if score >= min_opportunity_score:
+                            scored_opportunities.append((score, opp))
+                    
+                    # Trier par score décroissant et limiter le nombre
+                    scored_opportunities.sort(key=lambda x: x[0], reverse=True)
+                    scored_opportunities = scored_opportunities[:max_opportunities_per_cycle]
+                    try:
+                        log.debug(f"{strategy_name}: {len(scored_opportunities)} opportunities after scoring/filtering (processed cap {max_opportunities_per_cycle})")
+                    except Exception:
+                        pass
+                    
+                    # Traiter les meilleures opportunités
+                    for score, opportunity in scored_opportunities:
+                        if opportunities_processed >= max_opportunities_per_cycle:
+                            break
+                        opportunities_processed += 1
+                        
+                        # Appel LLM uniquement pour opportunités scorées
+                        decision = orchestrator.decide_trade(
+                            strategy_name=strategy_name,
+                            opportunity=opportunity,
+                            market_context=context,
                         )
-                        try:
-                            log.info(f"Executed {strategy_name} on {decision['symbol']} | size_usd={float(decision.get('size_usd', 0.0)):.2f} | conf={float(decision.get('confidence', 0.0)):.2f}")
-                        except Exception:
-                            pass
+                        if decision.get("execute") and float(decision.get("confidence", 0.0)) > 0.7:
+                            decision["symbol"] = opportunity.get("symbol", symbols[0])
+                            executor.execute_strategy(strategy_name, decision, weights)
+                            performance_tracker.record_trade_start(
+                                strategy=strategy_name,
+                                entry_price=float(opportunity.get("price", 0.0) or opportunity.get("mid", 0.0) or 0.0),
+                                size=float(decision.get("size_usd", 0.0)),
+                                symbol=decision["symbol"],
+                            )
+                            try:
+                                log.info(f"Executed {strategy_name} on {decision['symbol']} | size_usd={float(decision.get('size_usd', 0.0)):.2f} | conf={float(decision.get('confidence', 0.0)):.2f}")
+                            except Exception:
+                                pass
 
             # 5. Update performance tracking
             performance_tracker.update_positions(broker.get_portfolio())
@@ -448,13 +463,32 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
             storage.set_runtime_stopped()
         except Exception:
             pass
+        return True
+
+    # If we reach here without an explicit stop request, it means the loop exited unexpectedly
+    # (e.g., due to external factors). Return False so a supervisor can decide to restart.
+    return False
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="C4$H M4CH1N3 Hyperliquid Live Runner")
     parser.add_argument("--config", type=str, default="configs/live.hyperliquid.yaml")
     args = parser.parse_args()
-    run_live(args.config)
+    # Optional supervisor loop: restart automatically unless a cooperative stop was requested
+    auto_restart = str(os.getenv("CRYPTOBOT_AUTO_RESTART", "0")).lower() in {"1", "true", "yes"}
+    if not auto_restart:
+        run_live(args.config)
+        return
+    backoff = 3.0
+    while True:
+        stopped = run_live(args.config)
+        if stopped:
+            break
+        try:
+            time.sleep(backoff)
+        except Exception:
+            pass
+        backoff = min(backoff * 2.0, 60.0)
 
 if __name__ == "__main__":
     main()
