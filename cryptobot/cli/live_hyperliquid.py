@@ -91,7 +91,7 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
     )
     try:
         log.info(
-            f"Connected to Hyperliquid | network={'testnet' if mode_manager.is_testnet() else 'mainnet'} | wallet={getattr(broker, 'account_address', mode_manager.wallet_address)}"
+            f"Connected to Hyperliquid | network={'testnet' if mode_manager.is_testnet() else 'mainnet'} | wallet={getattr(broker, 'query_address', mode_manager.wallet_address)}"
         )
         # First portfolio snapshot
         pf = broker.get_portfolio()
@@ -119,7 +119,7 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
     # Record runtime start and clear any old stop requests
     try:
         pid = os.getpid()
-        actual_address = getattr(broker, "account_address", mode_manager.wallet_address)
+        actual_address = getattr(broker, "query_address", mode_manager.wallet_address)
         storage.set_runtime_started(pid=pid, config_path=str(config_path), testnet=bool(mode_manager.is_testnet()), wallet_address=str(actual_address))
         storage.clear_runtime_stop_request()
     except Exception:
