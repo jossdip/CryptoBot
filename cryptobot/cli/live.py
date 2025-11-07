@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 import threading
+import fcntl
 
 import pandas as pd
 
@@ -28,6 +29,48 @@ from cryptobot.strategy.llm_strategy import LLMStrategy
 from cryptobot.strategy.nof1 import Nof1Params, Nof1Strategy
 
 
+def _expand(path: str) -> str:
+    return os.path.expandvars(os.path.expanduser(path))
+
+
+def _acquire_single_instance_lock() -> object | None:
+    try:
+        lock_path = _expand(os.getenv("CRYPTOBOT_LOCK_PATH", "~/.cryptobot/cryptobot.lock"))
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        f = open(lock_path, "a+")
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except Exception:
+            try:
+                f.seek(0)
+                txt = f.read().strip()
+                incumbent_pid = int(txt) if txt and txt.isdigit() else None
+                if incumbent_pid:
+                    try:
+                        os.kill(incumbent_pid, 0)
+                        f.close()
+                        return None
+                    except OSError:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:
+                    f.close()
+                    return None
+            except Exception:
+                f.close()
+                return None
+        try:
+            f.seek(0)
+            f.truncate()
+            f.write(str(os.getpid()))
+            f.flush()
+            os.fsync(f.fileno())
+        except Exception:
+            pass
+        return f
+    except Exception:
+        return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="CryptoBot Live Runner")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
@@ -42,6 +85,12 @@ def main() -> None:
     cfg = AppConfig.load(args.config)
     setup_logging(level="INFO")
     log = get_logger()
+
+    # Global single-instance lock
+    lock_handle = _acquire_single_instance_lock()
+    if lock_handle is None:
+        log.warning("Another CryptoBot instance is already running (global lock held). Refusing to start.")
+        return
 
     log.info("=" * 60)
     log.info("CryptoBot Live Runner starting...")
@@ -320,6 +369,13 @@ def main() -> None:
             if bar_count == 1:
                 log.info("Processing bars... (waiting for 50 bars before trading)")
             time.sleep(1.0)
+
+    # Release single-instance lock on exit
+    try:
+        if lock_handle:
+            lock_handle.close()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

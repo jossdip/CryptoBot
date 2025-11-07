@@ -68,7 +68,7 @@ class InteractiveShell:
         cfg = self.context.get("config")
         exchange = getattr(getattr(cfg, "general", None), "exchange_id", "hyperliquid") if cfg else "hyperliquid"
         completer = WordCompleter([
-            "start", "stop", "restart", "pause", "resume", "status", "ps", "pids", "monitor",
+            "start", "stop", "restart", "pause", "resume", "status", "ps", "pids", "enforce", "killdups", "monitor",
             "trades", "performance", "portfolio", "strategies", "weights",
             "risk", "config", "logs", "help", "exit", "quit", "clear", "version",
         ], ignore_case=True)
@@ -123,6 +123,9 @@ class InteractiveShell:
                 continue
             if cmd in {"ps", "pids"}:
                 self._cmd_ps()
+                continue
+            if cmd in {"enforce", "killdups"}:
+                self._cmd_enforce_single()
                 continue
             if cmd == "trades" or cmd == "t":
                 self._cmd_trades(args)
@@ -561,5 +564,39 @@ class InteractiveShell:
                 self.console.print("[yellow]Warning:[/yellow] Multiple bot processes detected. Consider `restart --force`.")
         except Exception as e:
             self.console.print(f"[red]ps failed:[/red] {e}")
+
+    def _cmd_enforce_single(self) -> None:
+        # Kill all duplicate processes, keep the DB pid if available
+        try:
+            pids = self._list_bot_pids()
+            if not pids:
+                self.console.print("No bot process detected.")
+                return
+            try:
+                rs = self._get_reporter().runtime_status() or {}
+                keep_pid = int(rs.get("pid")) if rs.get("pid") is not None else None
+            except Exception:
+                keep_pid = None
+            killed = []
+            for p in pids:
+                if keep_pid and p == keep_pid:
+                    continue
+                try:
+                    os.kill(p, signal.SIGTERM)
+                    time.sleep(0.5)
+                    try:
+                        os.kill(p, 0)
+                        os.kill(p, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    killed.append(p)
+                except Exception:
+                    pass
+            if keep_pid:
+                self.console.print(f"Kept pid {keep_pid}. Killed: {', '.join(str(x) for x in killed) if killed else 'none'}.")
+            else:
+                self.console.print(f"Killed: {', '.join(str(x) for x in killed) if killed else 'none'}.")
+        except Exception as e:
+            self.console.print(f"[red]enforce failed:[/red] {e}")
 
 

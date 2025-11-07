@@ -6,6 +6,7 @@ from typing import Dict, Any, Optional
 import os
 import threading
 from pathlib import Path
+import fcntl
 
 from cryptobot.core.config import AppConfig
 from cryptobot.core.logging import get_logger, setup_logging
@@ -28,6 +29,59 @@ from cryptobot.data.context_aggregator import MarketContextAggregator
 from cryptobot.monitor.storage import StorageManager
 
 
+def _expand(path: str) -> str:
+    return os.path.expandvars(os.path.expanduser(path))
+
+
+def _acquire_single_instance_lock() -> Optional[object]:
+    """
+    Prevent multiple bot instances system-wide using an exclusive lock file.
+    Returns an open file handle if the lock is acquired, else None.
+    The caller must keep the handle alive for the lifetime of the process.
+    """
+    try:
+        lock_path = _expand(os.getenv("CRYPTOBOT_LOCK_PATH", "~/.cryptobot/cryptobot.lock"))
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        f = open(lock_path, "a+")
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except Exception:
+            # Lock held by another process; attempt to read incumbent pid for diagnostics
+            try:
+                f.seek(0)
+                txt = f.read().strip()
+                incumbent_pid = int(txt) if txt and txt.isdigit() else None
+                if incumbent_pid:
+                    try:
+                        # Check if incumbent pid is alive
+                        os.kill(incumbent_pid, 0)
+                        # Alive -> respect existing instance
+                        f.close()
+                        return None
+                    except OSError:
+                        # Stale pid; try to acquire again
+                        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:
+                    # Unknown holder; refuse
+                    f.close()
+                    return None
+            except Exception:
+                f.close()
+                return None
+        # We own the lock: write our pid
+        try:
+            f.seek(0)
+            f.truncate()
+            f.write(str(os.getpid()))
+            f.flush()
+            os.fsync(f.fileno())
+        except Exception:
+            pass
+        return f
+    except Exception:
+        return None
+
+
 def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> bool:
     load_local_environment()
     cfg = AppConfig.load(config_path)
@@ -35,6 +89,12 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
     log = get_logger()
 
     log.info("Starting Hyperliquid live runner...")
+    # Global single-instance lock (system-wide)
+    lock_handle = _acquire_single_instance_lock()
+    if lock_handle is None:
+        log.warning("Another CryptoBot instance is already running (global lock held). Refusing to start.")
+        # Return True so the supervisor loop does NOT retry
+        return True
     try:
         log.info(f"Config: {config_path}")
         env_path = os.getenv("CRYPTOBOT_ENV_PATH")
@@ -56,7 +116,8 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
         threshold = max(15, int(getattr(cfg.llm, "decision_interval_sec", 30)) * 3)
         if status == "ACTIVE" and (time.time() - last_hb) < float(threshold):
             log.warning("Another CryptoBot instance appears ACTIVE (recent heartbeat). Refusing to start.")
-            return
+            # Return True so supervisor loop exits and does not retry
+            return True
     except Exception:
         pass
 
@@ -491,10 +552,22 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
             storage.set_runtime_stopped()
         except Exception:
             pass
+        # Release single-instance lock
+        try:
+            if lock_handle:
+                lock_handle.close()
+        except Exception:
+            pass
         return True
 
     # If we reach here without an explicit stop request, it means the loop exited unexpectedly
     # (e.g., due to external factors). Return False so a supervisor can decide to restart.
+    # Release single-instance lock before exiting.
+    try:
+        if lock_handle:
+            lock_handle.close()
+    except Exception:
+        pass
     return False
 
 
