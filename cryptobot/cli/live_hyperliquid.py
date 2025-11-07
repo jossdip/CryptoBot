@@ -268,6 +268,7 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
         
         return max(0.0, min(1.0, score))
 
+    stop_requested = False
     while not (stop_event and stop_event.is_set()):
         try:
             # Honor remote stop requests (from shell/systemd)
@@ -275,6 +276,7 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                 rs = storage.get_runtime_status() or {}
                 if bool(rs.get("desired_stop", False)):
                     log.info("Stop requested remotely. Shutting down gracefully...")
+                    stop_requested = True
                     break
             except Exception:
                 pass
@@ -439,10 +441,13 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
             monitor_engine.stop()
         except Exception:
             pass
-    try:
-        storage.set_runtime_stopped()
-    except Exception:
-        pass
+    # Only mark STOPPED in storage if a remote stop was explicitly requested.
+    # For unexpected exits/crashes, we let the heartbeat freshness determine status.
+    if stop_requested:
+        try:
+            storage.set_runtime_stopped()
+        except Exception:
+            pass
 
 
 def main() -> None:
