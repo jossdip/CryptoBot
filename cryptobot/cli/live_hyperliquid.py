@@ -125,6 +125,26 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
     except Exception:
         pass
 
+    # Heartbeat watchdog: keep runtime heartbeat fresh regardless of main loop pace
+    heartbeat_stop = threading.Event()
+    def _heartbeat_maintainer() -> None:
+        while not heartbeat_stop.is_set():
+            try:
+                storage.record_runtime_heartbeat(pid=pid)
+            except Exception:
+                pass
+            try:
+                time.sleep(2.0)
+            except Exception:
+                # If sleep interrupted, loop will re-check stop flag
+                pass
+    hb_thread = threading.Thread(target=_heartbeat_maintainer, daemon=True)
+    try:
+        hb_thread.start()
+    except Exception:
+        # If watchdog cannot start, continue without it (main loop still records heartbeats)
+        pass
+
     llm_client = LLMClient.from_env()
     orchestrator = LLMOrchestrator(llm_client)
     weight_manager = WeightManager()
@@ -456,6 +476,13 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
             monitor_engine.stop()
         except Exception:
             pass
+    # Stop heartbeat watchdog
+    try:
+        heartbeat_stop.set()
+        if hb_thread and hb_thread.is_alive():
+            hb_thread.join(timeout=2.0)
+    except Exception:
+        pass
     # Only mark STOPPED in storage if a remote stop was explicitly requested.
     # For unexpected exits/crashes, we let the heartbeat freshness determine status.
     if stop_requested:
