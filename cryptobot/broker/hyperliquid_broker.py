@@ -99,14 +99,18 @@ class HyperliquidBroker:
 
         # Keep references for later (Info queries, etc.)
         self._wallet_obj = wallet_obj
+        # Address used to sign transactions (API wallet / agent wallet)
         self.account_address = wallet_obj.address
+        # Address to query portfolio/state on Hyperliquid (must be the main account address)
+        # If a wallet_address was provided in config/.env, prefer it; otherwise fall back to signer address
+        self.query_address = self.conn.wallet_address or self.account_address
 
         # Initialize client with wallet object and base_url; pass account_address for clarity
         try:
             self.client = HyperliquidClient(
                 wallet_obj,
                 base_url=self.conn.base_url,
-                account_address=self.conn.wallet_address or self.account_address,
+                account_address=self.query_address,
             )
         except TypeError:
             # Fallback: without account_address
@@ -302,9 +306,10 @@ class HyperliquidBroker:
                 if info_client is None:
                     raise last_err or RuntimeError("Failed to construct Info client")
                 # Call user_state using the derived address (source of truth)
+                query_addr = self.query_address
                 for call in (
-                    lambda: info_client.user_state(self.account_address),  # type: ignore[attr-defined]
-                    lambda: info_client.user_state(address=self.account_address),  # type: ignore[attr-defined]
+                    lambda: info_client.user_state(query_addr),  # type: ignore[attr-defined]
+                    lambda: info_client.user_state(address=query_addr),  # type: ignore[attr-defined]
                 ):
                     try:
                         raw = call()
