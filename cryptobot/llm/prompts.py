@@ -107,6 +107,9 @@ SIGNAL EVALUATION (for confidence scoring):
 - Market cap: Higher = more liquid and stable
 - Trading volume: Higher = more confirmation
 - Funding rates: Shows trader sentiment
+- IMPORTANT: If a signal is unavailable (available=false) or confidence is null/missing,
+  IGNORE it entirely. Do not penalize confidence because of missing data. Only use
+  present signals to compute confidence.
 
 Decide if we should execute this trade. Output JSON:
 {{

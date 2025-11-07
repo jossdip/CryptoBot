@@ -24,8 +24,18 @@ class SentimentRedditStrategy:
             for p in posts:
                 t = str(p.get("title") or "") + "\n" + str(p.get("body") or "")
                 if t.strip():
-                    texts.append(t[:500])
-        sentiment = self.analyze_sentiment(texts[:50]) if texts else {"score": 0.0, "confidence": 0.0}
+                    texts.append(t.strip())
+        # Deduplicate and downsample aggressively to reduce token usage
+        seen = set()
+        unique_texts: List[str] = []
+        for t in texts:
+            key = t[:128]
+            if key not in seen:
+                unique_texts.append(t[:200])  # hard cap per item
+                seen.add(key)
+            if len(unique_texts) >= 20:
+                break
+        sentiment = self.analyze_sentiment(unique_texts) if unique_texts else {"score": 0.0, "confidence": 0.0}
         return sentiment
 
 

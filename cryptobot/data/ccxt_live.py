@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, Optional, List
 
 import ccxt
 
@@ -77,18 +77,61 @@ def live_ohlcv(
 
 
 def fetch_mark_price(exchange_id: str, symbol: str, api_key: Optional[str] = None, api_secret: Optional[str] = None, market_type: str = "spot", testnet: bool = False) -> Optional[float]:
-    """Best-effort mark price fetch. Falls back to last price when mark is unavailable."""
+    """Best-effort mark price fetch. Attempts multiple symbol variants and falls back to last price."""
     ex = _build_exchange(exchange_id=exchange_id, api_key=api_key, api_secret=api_secret, market_type=market_type, testnet=testnet)
+
+    def _candidates(sym: str, mtype: str) -> List[str]:
+        # Generate common CCXT symbol variants across exchanges (spot/perp)
+        cands: List[str] = []
+        base = sym
+        # Strip CCXT contract suffix if present (e.g., BTC/USDT:USDT -> BTC/USDT)
+        if ":" in base:
+            base = base.split(":")[0]
+        # Common base forms
+        cands.append(base)  # e.g., BTC/USDT
+        # Linear perps (most common)
+        if base.endswith("/USDT"):
+            cands.append(base + ":USDT")  # e.g., BTC/USDT:USDT
+        # Inverse perps
+        if base.endswith("/USD"):
+            cands.append(base + ":USD")   # e.g., BTC/USD:USD
+            cands.append(base.replace("/USD", "/USDT"))
+        # Alternate quote form fallback
+        if "/USDT" in base and ":USDT" not in base:
+            cands.append(base.replace("/USDT", "/USD"))
+        # Deduplicate while preserving order
+        seen = set()
+        uniq: List[str] = []
+        for c in cands:
+            if c not in seen:
+                uniq.append(c)
+                seen.add(c)
+        # For futures/perp, prioritize contract symbols first
+        if str(mtype).lower().startswith(("future", "perp")):
+            uniq = [c for c in uniq if ":" in c] + [c for c in uniq if ":" not in c]
+        return uniq
+
+    try_syms = _candidates(symbol, market_type)
     try:
-        tkr = ex.fetch_ticker(symbol)
-        # Prefer mark price when present (e.g., Binance futures)
-        info = tkr.get("info", {}) if isinstance(tkr, dict) else {}
-        mark = None
-        if isinstance(info, dict):
-            mark = info.get("markPrice") or info.get("lastPrice")
-        if mark is not None:
-            return float(mark)
-        last = tkr.get("last") if isinstance(tkr, dict) else None
-        return float(last) if last is not None else None
+        markets = getattr(ex, "markets", None) or {}
     except Exception:
-        return None
+        markets = {}
+
+    for sym in try_syms:
+        try:
+            # If markets are loaded, skip unknown symbols to avoid noisy errors
+            if markets and sym not in markets:
+                continue
+            tkr = ex.fetch_ticker(sym)
+            info = tkr.get("info", {}) if isinstance(tkr, dict) else {}
+            mark = None
+            if isinstance(info, dict):
+                mark = info.get("markPrice") or info.get("indexPrice") or info.get("lastPrice")
+            if mark is not None:
+                return float(mark)
+            last = tkr.get("last") if isinstance(tkr, dict) else None
+            if last is not None:
+                return float(last)
+        except Exception:
+            continue
+    return None

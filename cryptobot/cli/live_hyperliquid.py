@@ -329,7 +329,8 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
             context = context_aggregator.build_context(
                 symbols=symbols,
                 include_sentiment=True,
-                include_orderbook=bool(getattr(getattr(cfg, "data", None), "include_orderbook", False)),
+                # Default to including orderbook to support market making; can be disabled via config
+                include_orderbook=bool(getattr(getattr(cfg, "data", None), "include_orderbook", True)),
             )
 
             # 2. LLM decides strategy weights (optimisé: moins fréquent)

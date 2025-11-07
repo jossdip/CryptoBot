@@ -24,8 +24,18 @@ class SentimentTwitterStrategy:
             for tw in tweets:
                 t = str(tw.get("text") or "")
                 if t.strip():
-                    texts.append(t[:280])
-        sentiment = self.analyze_sentiment(texts[:50]) if texts else {"score": 0.0, "confidence": 0.0}
+                    texts.append(t.strip())
+        # Deduplicate and downsample aggressively to reduce token usage
+        seen = set()
+        unique_texts: List[str] = []
+        for t in texts:
+            key = t[:96]
+            if key not in seen:
+                unique_texts.append(t[:200])
+                seen.add(key)
+            if len(unique_texts) >= 20:
+                break
+        sentiment = self.analyze_sentiment(unique_texts) if unique_texts else {"score": 0.0, "confidence": 0.0}
         return sentiment
 
 

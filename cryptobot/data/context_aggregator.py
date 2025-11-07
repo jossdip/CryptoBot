@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, List, Any, Optional, Tuple
 import os
 import math
+import statistics
 
 from cryptobot.data.ccxt_live import fetch_mark_price
 
@@ -54,6 +55,12 @@ class MarketContextAggregator:
     def _get_prices(self, symbols: List[str]) -> Dict[str, Dict[str, float]]:
         out: Dict[str, Dict[str, float]] = {}
         venues = self._venues()
+        # Allow configurable outlier filter (percent from median). Default 1%
+        try:
+            outlier_pct = float(os.getenv("CB_PRICE_OUTLIER_PCT", "0.01"))
+        except Exception:
+            outlier_pct = 0.01
+
         for s in symbols:
             s_ccxt = self._normalize_symbol_for_ccxt(s)
             per_ex: Dict[str, float] = {}
@@ -62,7 +69,26 @@ class MarketContextAggregator:
                 p = fetch_mark_price(exchange_id=ex, symbol=s_ccxt, api_key=k, api_secret=sec, market_type="future" if getattr(self.config.general, "market_type", "spot") == "futures" else "spot", testnet=bool(getattr(self.config.broker, "testnet", False)))
                 if p is not None:
                     per_ex[ex] = float(p)
-            # Keep placeholder for Hyperliquid if no CCXT data found yet
+            # Filter outliers vs median to avoid instrument mismatches (spot vs perp, inverse vs linear)
+            try:
+                if len(per_ex) >= 2:
+                    vals = list(per_ex.values())
+                    med = statistics.median(vals)
+                    # Keep only prices within threshold of median
+                    filtered = {
+                        ex: px for ex, px in per_ex.items()
+                        if med > 0 and abs(px - med) / med <= outlier_pct
+                    }
+                    # If everything filtered out (extreme divergence), keep the closest to median
+                    if not filtered and med > 0:
+                        # pick exchange with min absolute deviation
+                        ex_best = min(per_ex.keys(), key=lambda e: abs(per_ex[e] - med))
+                        filtered = {ex_best: per_ex[ex_best]}
+                    per_ex = filtered or per_ex
+            except Exception:
+                # In case statistics.median fails unexpectedly, keep raw per_ex
+                pass
+            # Keep placeholder if still empty
             if not per_ex:
                 per_ex["binance"] = 0.0
             out[s] = per_ex
@@ -95,9 +121,55 @@ class MarketContextAggregator:
         out: Dict[str, float] = {}
         for s in symbols:
             try:
-                out[s] = float(self.broker.get_funding_rate(s))
+                rate = float(self.broker.get_funding_rate(s))
             except Exception:
-                out[s] = 0.0
+                rate = 0.0
+            # Fallback via CCXT (best-effort) if broker returns 0.0
+            if rate == 0.0:
+                try:
+                    import ccxt  # type: ignore
+                    # Try common venues for funding rates
+                    for ex_id in self._venues():
+                        try:
+                            ex = getattr(ccxt, ex_id)({"enableRateLimit": True, "options": {"defaultType": "future"}})
+                            ex.load_markets()
+                            # Try common contract naming variants
+                            base = s.replace(":USD", "").replace("/USD", "/USDT")
+                            candidates = [base + ":USDT", base, base.replace("/USDT", "/USD") + ":USD"]
+                            symbol_found = None
+                            for c in candidates:
+                                if c in ex.markets:
+                                    symbol_found = c
+                                    break
+                            if symbol_found is None:
+                                continue
+                            fr = None
+                            # fetchFundingRate is not universally implemented; guard call
+                            if hasattr(ex, "fetchFundingRate"):
+                                try:
+                                    data = ex.fetchFundingRate(symbol_found)  # type: ignore[attr-defined]
+                                    # CCXT returns either dict with 'info' or flat fields
+                                    if isinstance(data, dict):
+                                        for key in ("fundingRate", "fundingRateDaily", "rate"):
+                                            if key in data:
+                                                fr = float(data[key])
+                                                break
+                                    if fr is None and isinstance(data, dict) and "info" in data and isinstance(data["info"], dict):
+                                        info = data["info"]
+                                        for key in ("fundingRate", "fundingRateDaily", "rate"):
+                                            if key in info:
+                                                fr = float(info[key])
+                                                break
+                                except Exception:
+                                    fr = None
+                            if fr is not None:
+                                rate = float(fr)
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+            out[s] = float(rate or 0.0)
         return out
 
     def _get_orderbooks(self, symbols: List[str]) -> Dict[str, Any]:
@@ -183,14 +255,20 @@ class MarketContextAggregator:
         These are SIGNAL SOURCES, not trading strategies.
         They are used by ALL trading strategies to evaluate confidence and timing.
         """
+        # Availability flags so missing signals do not penalize confidence
+        reddit_enabled = bool(getattr(getattr(self.config, "sentiment", object()), "reddit", object()) and getattr(self.config.sentiment.reddit, "enabled", False))
+        twitter_enabled = bool(getattr(getattr(self.config, "sentiment", object()), "twitter", object()) and getattr(self.config.sentiment.twitter, "enabled", False))
+        polymarket_enabled = bool(getattr(getattr(self.config, "sentiment", object()), "polymarket", object()) and getattr(self.config.sentiment.polymarket, "enabled", False))
+        twitter_token_present = bool(os.getenv("TWITTER_BEARER_TOKEN", "").strip())
+
         sentiment: Dict[str, Any] = {
-            "reddit": {"score": 0.0, "confidence": 0.0},
-            "twitter": {"score": 0.0, "confidence": 0.0},
-            "polymarket": {"score": 0.0, "confidence": 0.0},
+            "reddit": {"score": 0.0, "confidence": None, "available": bool(self.reddit_collector) and reddit_enabled},
+            "twitter": {"score": 0.0, "confidence": None, "available": bool(self.twitter_collector) and twitter_enabled and twitter_token_present},
+            "polymarket": {"score": 0.0, "confidence": None, "available": bool(self.polymarket_collector) and polymarket_enabled},
         }
         
         # Collect Reddit signals
-        if self.reddit_collector and self.config:
+        if self.reddit_collector and self.config and reddit_enabled:
             try:
                 subreddits = getattr(self.config.sentiment.reddit, "subreddits", [])
                 if subreddits:
@@ -198,12 +276,13 @@ class MarketContextAggregator:
                     sentiment["reddit"] = {
                         "score": float(reddit_signal.get("score", 0.0)),
                         "confidence": float(reddit_signal.get("confidence", 0.0)),
+                        "available": True,
                     }
             except Exception:
                 pass
         
         # Collect Twitter signals
-        if self.twitter_collector and self.config:
+        if self.twitter_collector and self.config and twitter_enabled and twitter_token_present:
             try:
                 keywords = getattr(self.config.sentiment.twitter, "keywords", [])
                 if keywords:
@@ -211,12 +290,13 @@ class MarketContextAggregator:
                     sentiment["twitter"] = {
                         "score": float(twitter_signal.get("score", 0.0)),
                         "confidence": float(twitter_signal.get("confidence", 0.0)),
+                        "available": True,
                     }
             except Exception:
                 pass
         
         # Collect Polymarket signals (highest confidence - real money bets)
-        if self.polymarket_collector and self.config:
+        if self.polymarket_collector and self.config and polymarket_enabled:
             try:
                 keywords = getattr(self.config.sentiment.polymarket, "keywords", [])
                 if keywords:
@@ -224,6 +304,7 @@ class MarketContextAggregator:
                     sentiment["polymarket"] = {
                         "score": float(polymarket_signal.get("score", 0.0)),
                         "confidence": float(polymarket_signal.get("confidence", 0.0)),
+                        "available": True,
                         "markets_count": int(polymarket_signal.get("markets_count", 0)),
                         "total_volume": float(polymarket_signal.get("total_volume", 0.0)),
                     }

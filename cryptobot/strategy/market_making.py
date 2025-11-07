@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Dict, Any
+from typing import Dict, Any, List
+import statistics
 
 from loguru import logger as log
 
@@ -29,9 +30,38 @@ class MarketMakingStrategy:
     def detect_opportunities(self, context: Dict[str, Any]) -> list[Dict[str, Any]]:
         # For MM, opportunity is continuous; we synthesize a decision input
         symbol = next(iter(context.get("prices", {}).keys()), "BTC/USD:USD")
-        mid = float(context.get("prices", {}).get(symbol, {}).get("hyperliquid", 30000.0))
+
+        # 1) Prefer orderbook mid when available (best bid/ask)
+        mid_price: float = 0.0
+        try:
+            ob_map: Dict[str, Any] = context.get("orderbook_depths", {}) or context.get("market", {}).get("orderbook_depths", {}) or {}
+            ob = ob_map.get(symbol, {})
+            bids: List[List[float]] = ob.get("bids", []) if isinstance(ob, dict) else []
+            asks: List[List[float]] = ob.get("asks", []) if isinstance(ob, dict) else []
+            if bids and asks and isinstance(bids[0], list) and isinstance(asks[0], list):
+                best_bid = float(bids[0][0])
+                best_ask = float(asks[0][0])
+                if best_bid > 0 and best_ask > 0:
+                    mid_price = (best_bid + best_ask) / 2.0
+        except Exception:
+            pass
+
+        # 2) Fallback to robust cross-venue median (after aggregator outlier filtering)
+        if mid_price <= 0.0:
+            try:
+                price_map: Dict[str, float] = context.get("prices", {}).get(symbol, {})  # exchange -> price
+                vals = [float(v) for v in price_map.values() if float(v) > 0]
+                if vals:
+                    mid_price = float(statistics.median(vals))
+            except Exception:
+                mid_price = 0.0
+
+        # 3) Last resort: leave as zero (or very small) rather than stale 30000.0
+        if mid_price <= 0.0:
+            mid_price = 0.0
+
         vol = float(context.get("volatility", {}).get(symbol, 0.01))
         spread = self.calculate_spread(symbol, vol)
-        return [{"symbol": symbol, "mid": mid, "spread": spread}]
+        return [{"symbol": symbol, "mid": mid_price, "spread": spread}]
 
 
