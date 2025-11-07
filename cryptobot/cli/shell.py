@@ -6,6 +6,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 import os
+import sys
+import subprocess
 import signal
 
 from prompt_toolkit import PromptSession
@@ -39,6 +41,7 @@ class InteractiveShell:
         self._session = PromptSession(history=self._history)
         self._commands: Dict[str, Command] = {}
         self._running_thread: Optional[threading.Thread] = None
+        self._running_pid: Optional[int] = None
         self._stop_event = threading.Event()
         self._register_commands()
         # Démarrer l'animation du logo si activée dans la config
@@ -256,15 +259,27 @@ class InteractiveShell:
         except Exception:
             pass
 
-        if self._running_thread and self._running_thread.is_alive():
-            self.console.print("Already running in this session")
-            return
-        self._stop_event.clear()
-        # Suppress console logging in background trading thread; logs still go to file
-        os.environ["CRYPTOBOT_DISABLE_CONSOLE_LOG"] = "1"
-        self._running_thread = threading.Thread(target=self._trading_target, daemon=True)
-        self._running_thread.start()
-        self.console.print("Trading started")
+        # Spawn detached background process so it survives shell exit
+        try:
+            cfg_path = self.context.get("config_path") or "configs/live.hyperliquid.yaml"
+            env = os.environ.copy()
+            env["CRYPTOBOT_DISABLE_CONSOLE_LOG"] = "1"
+            # Ensure monitor DB is the same between shells and runner if set
+            # (uses existing CRYPTOBOT_MONITOR_DB env if provided)
+            os.makedirs("logs", exist_ok=True)
+            out_path = os.path.join("logs", "runner.out")
+            with open(out_path, "ab") as out:
+                proc = subprocess.Popen(
+                    [sys.executable, "-m", "cryptobot.cli.live_hyperliquid", "--config", str(cfg_path)],
+                    stdout=out,
+                    stderr=out,
+                    env=env,
+                    start_new_session=True,
+                )
+                self._running_pid = int(proc.pid)
+                self.console.print(f"Trading started (pid={self._running_pid})")
+        except Exception as e:
+            self.console.print(f"[red]Failed to start bot:[/red] {e}")
 
     def _stop_trading(self, args: Optional[List[str]] = None) -> None:
         # Signal the background loop to stop cooperatively (local + remote)
