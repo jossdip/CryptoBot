@@ -206,7 +206,7 @@ def run_live(config_path: str) -> None:
             context = context_aggregator.build_context(
                 symbols=symbols,
                 include_sentiment=True,
-                include_orderbook=True,
+                include_orderbook=bool(getattr(getattr(cfg, "data", None), "include_orderbook", False)),
             )
 
             # 2. LLM decides strategy weights (optimisé: moins fréquent)

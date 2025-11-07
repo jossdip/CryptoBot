@@ -23,6 +23,7 @@ data:
   provider: hyperliquid
   steps_per_bar: 20
   monitor_new_listings: true  # for sniping
+  include_orderbook: false
 
 broker:
   fee_bps: 2  # Hyperliquid taker fee
