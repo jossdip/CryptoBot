@@ -35,6 +35,26 @@ def setup_logging(log_dir: str = "logs", level: str = "INFO") -> None:
         format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
     )
 
+    # Optional dedicated LLM trace sink (JSONL), enabled when CRYPTOBOT_LLM_DEBUG is set
+    llm_debug = str(os.getenv("CRYPTOBOT_LLM_DEBUG", "0")).lower() in {"1", "true", "yes"}
+    if llm_debug:
+        _logger.add(
+            Path(log_dir) / "llm.log",
+            rotation="10 MB",
+            retention=10,
+            level="DEBUG",
+            enqueue=True,
+            backtrace=False,
+            diagnose=False,
+            filter=lambda record: record["extra"].get("component") == "llm",
+            serialize=True,
+        )
+
 
 def get_logger() -> _logger.__class__:
     return _logger
+
+
+def get_llm_logger() -> _logger.__class__:
+    """Return a logger bound for LLM tracing. Only emits to llm.log when LLM debug is enabled."""
+    return _logger.bind(component="llm")

@@ -8,6 +8,7 @@ from typing import Dict, Optional
 import pandas as pd
 
 from cryptobot.llm.client import LLMClient
+from cryptobot.core.logging import get_llm_logger
 
 
 @dataclass
@@ -34,9 +35,24 @@ class LLMStrategy:
 
     def decide(self, df: pd.DataFrame, position_qty: float) -> Optional[str]:
         if not self._should_call(df):
+            reason = "cooldown" if (time.time() - self._last_call_ts) < self.min_call_cooldown_sec else "atr_low"
+            get_llm_logger().debug({
+                "event": "llm_strategy_skip",
+                "call": "spot_decide",
+                "reason": reason,
+                "since_last_call_sec": round(time.time() - self._last_call_ts, 2),
+                "min_cooldown_sec": self.min_call_cooldown_sec,
+                "min_atr_ratio": self.min_atr_ratio,
+            })
             return self._last_decision
         recent = df.iloc[-120:].to_dict(orient="list")
         ctx = {"position_qty": position_qty, "recent": {k: v[-20:] for k, v in recent.items() if k in {"open","high","low","close","volume"}}}
+        get_llm_logger().debug({
+            "event": "llm_strategy_call",
+            "call": "score_risk",
+            "context_keys": list(ctx.keys()),
+            "recent_lengths": {k: len(v) for k, v in ctx.get("recent", {}).items()},
+        })
         mult = self.client.score_risk(ctx)
         decision: Optional[str] = None
         if mult > 1.02 and position_qty <= 0:
@@ -47,6 +63,12 @@ class LLMStrategy:
             decision = None
         self._last_call_ts = time.time()
         self._last_decision = decision
+        get_llm_logger().debug({
+            "event": "llm_strategy_result",
+            "call": "score_risk",
+            "multiplier": mult,
+            "mapped_decision": decision,
+        })
         return decision
 
     def decide_futures(self, df: pd.DataFrame, extra_context: Optional[Dict] = None) -> Dict:
@@ -68,9 +90,20 @@ class LLMStrategy:
         }
         if extra_context:
             ctx.update(extra_context)
+        get_llm_logger().debug({
+            "event": "llm_strategy_call",
+            "call": "decide_futures",
+            "context_keys": list(ctx.keys()),
+            "recent_lengths": {k: len(v) for k, v in ctx.get("recent", {}).items()},
+        })
         decision = self.client.decide_futures(ctx)
         self._last_call_ts = time.time()
         # store a coarse mapping for compatibility with last_decision
         dir_map = {"long": "buy", "short": "sell", "flat": None}
         self._last_decision = dir_map.get(str(decision.get("direction", "flat")), None)
+        get_llm_logger().debug({
+            "event": "llm_strategy_result",
+            "call": "decide_futures",
+            "decision": decision,
+        })
         return decision

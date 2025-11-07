@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Any
 from collections import defaultdict
 
 import httpx
 from loguru import logger as log
+from cryptobot.core.logging import get_llm_logger
 
 
 # DeepSeek pricing (2024) - DeepSeek-V3 (Chat)
@@ -112,6 +114,8 @@ class LLMClient:
             "Output only the number."
         )
         try:
+            req_id = str(uuid.uuid4())
+            t0 = time.time()
             with httpx.Client(timeout=15.0) as client:
                 resp = client.post(
                     f"{self.base_url}/chat/completions",
@@ -129,16 +133,26 @@ class LLMClient:
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"].strip()
-                if str(os.getenv("CRYPTOBOT_LLM_DEBUG", "0")).lower() in {"1", "true", "yes"}:
-                    log.debug({
-                        "llm_call": "score_risk",
-                        "prompt": prompt,
-                        "response": content,
-                        "usage": data.get("usage", {}),
-                    })
+                latency_ms = int((time.time() - t0) * 1000)
+                usage = data.get("usage", {})
+                tokens_input = usage.get("prompt_tokens", int(len(prompt.split()) * 1.3))
+                tokens_output = usage.get("completion_tokens", 10)
+                est_cost = tokens_input * DEEPSEEK_INPUT_COST_MISS + tokens_output * DEEPSEEK_OUTPUT_COST
+                get_llm_logger().debug({
+                    "event": "llm_call_success",
+                    "req_id": req_id,
+                    "call": "score_risk",
+                    "model": self.model,
+                    "temperature": 0.2,
+                    "max_tokens": 10,
+                    "latency_ms": latency_ms,
+                    "tokens": {"input": tokens_input, "output": tokens_output},
+                    "estimated_cost_usd": round(est_cost, 8),
+                    "prompt": prompt,
+                    "response": content,
+                    "usage": usage,
+                })
                 # Track cost
-                tokens_input = data.get("usage", {}).get("prompt_tokens", len(prompt.split()) * 1.3)
-                tokens_output = data.get("usage", {}).get("completion_tokens", 10)
                 self._cost_tracker.record_call("score_risk", int(tokens_input), int(tokens_output), from_cache=False)
                 return float(content)
         except Exception:
@@ -160,6 +174,8 @@ class LLMClient:
             f"Context: {context}\n"
         )
         try:
+            req_id = str(uuid.uuid4())
+            t0 = time.time()
             with httpx.Client(timeout=20.0) as client:
                 resp = client.post(
                     f"{self.base_url}/chat/completions",
@@ -177,16 +193,26 @@ class LLMClient:
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"].strip()
-                if str(os.getenv("CRYPTOBOT_LLM_DEBUG", "0")).lower() in {"1", "true", "yes"}:
-                    log.debug({
-                        "llm_call": "decide_futures",
-                        "prompt": prompt,
-                        "response": content,
-                        "usage": data.get("usage", {}),
-                    })
+                latency_ms = int((time.time() - t0) * 1000)
+                usage = data.get("usage", {})
+                tokens_input = usage.get("prompt_tokens", int(len(prompt.split()) * 1.3))
+                tokens_output = usage.get("completion_tokens", 64)
+                est_cost = tokens_input * DEEPSEEK_INPUT_COST_MISS + tokens_output * DEEPSEEK_OUTPUT_COST
+                get_llm_logger().debug({
+                    "event": "llm_call_success",
+                    "req_id": req_id,
+                    "call": "decide_futures",
+                    "model": self.model,
+                    "temperature": 0.2,
+                    "max_tokens": 64,
+                    "latency_ms": latency_ms,
+                    "tokens": {"input": tokens_input, "output": tokens_output},
+                    "estimated_cost_usd": round(est_cost, 8),
+                    "prompt": prompt,
+                    "response": content,
+                    "usage": usage,
+                })
                 # Track cost
-                tokens_input = data.get("usage", {}).get("prompt_tokens", len(prompt.split()) * 1.3)
-                tokens_output = data.get("usage", {}).get("completion_tokens", 64)
                 self._cost_tracker.record_call("decide_futures", int(tokens_input), int(tokens_output), from_cache=False)
                 # Best-effort JSON extract
                 import json, re
@@ -240,6 +266,17 @@ class LLMClient:
             tokens_input = len(prompt.split()) * 1.3
             tokens_output = max_tokens * 0.3  # Estimate average output
             self._cost_tracker.record_call("call_cached", int(tokens_input), int(tokens_output), from_cache=True)
+            get_llm_logger().debug({
+                "event": "llm_cache_hit",
+                "call": "generic",
+                "model": self.model,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "json_mode": json_mode,
+                "tokens": {"input": int(tokens_input), "output": int(tokens_output)},
+                "estimated_cost_usd": round(tokens_input * DEEPSEEK_INPUT_COST_HIT + tokens_output * DEEPSEEK_OUTPUT_COST, 8),
+                "prompt": prompt,
+            })
             return self._cache[cache_key]
 
         messages = []
@@ -250,8 +287,10 @@ class LLMClient:
         messages.append({"role": "user", "content": prompt})
 
         last_err: Optional[Exception] = None
+        req_id = str(uuid.uuid4())
         for attempt in range(3):
             try:
+                t0 = time.time()
                 with httpx.Client(timeout=30.0) as client:
                     resp = client.post(
                         f"{self.base_url}/chat/completions",
@@ -266,20 +305,30 @@ class LLMClient:
                     resp.raise_for_status()
                     data = resp.json()
                     content = str(data["choices"][0]["message"]["content"]).strip()
-                    if str(os.getenv("CRYPTOBOT_LLM_DEBUG", "0")).lower() in {"1", "true", "yes"}:
-                        log.debug({
-                            "llm_call": "generic",
-                            "system": system_prompt,
-                            "json_mode": json_mode,
-                            "prompt": prompt,
-                            "response": content,
-                            "usage": data.get("usage", {}),
-                        })
+                    latency_ms = int((time.time() - t0) * 1000)
+                    usage = data.get("usage", {})
                     # Track cost
-                    tokens_input = data.get("usage", {}).get("prompt_tokens", len(prompt.split()) * 1.3)
-                    tokens_output = data.get("usage", {}).get("completion_tokens", max_tokens * 0.3)
+                    tokens_input = usage.get("prompt_tokens", len(prompt.split()) * 1.3)
+                    tokens_output = usage.get("completion_tokens", max_tokens * 0.3)
                     call_type = "call"  # Default, can be overridden by caller
                     self._cost_tracker.record_call(call_type, int(tokens_input), int(tokens_output), from_cache=False)
+                    get_llm_logger().debug({
+                        "event": "llm_call_success",
+                        "req_id": req_id,
+                        "call": "generic",
+                        "model": self.model,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "json_mode": json_mode,
+                        "latency_ms": latency_ms,
+                        "tokens": {"input": int(tokens_input), "output": int(tokens_output)},
+                        "estimated_cost_usd": round(tokens_input * DEEPSEEK_INPUT_COST_MISS + tokens_output * DEEPSEEK_OUTPUT_COST, 8),
+                        "system": system_prompt,
+                        "prompt": prompt,
+                        "response": content,
+                        "usage": usage,
+                        "attempt": attempt + 1,
+                    })
                     if json_mode:
                         m = re.search(r"\{[\s\S]*\}", content)
                         content = m.group(0) if m else content
@@ -290,6 +339,13 @@ class LLMClient:
                     return obj
             except Exception as e:  # pragma: no cover - network path
                 last_err = e
+                get_llm_logger().debug({
+                    "event": "llm_call_error",
+                    "req_id": req_id,
+                    "call": "generic",
+                    "attempt": attempt + 1,
+                    "error": str(e)[:400],
+                })
                 _time.sleep(1.5 ** attempt)
 
         # On failure, return empty dict for json_mode

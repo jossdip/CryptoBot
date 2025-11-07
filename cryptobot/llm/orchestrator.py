@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from cryptobot.llm.client import LLMClient
 from cryptobot.llm.prompts import ALLOCATION_PROMPT_TEMPLATE, TRADE_PROMPT_TEMPLATE
+from cryptobot.core.logging import get_llm_logger
 
 
 @dataclass
@@ -123,10 +124,20 @@ class LLMOrchestrator:
             "current_weights": vars(self.weights),
             "recent_returns": self._get_recent_returns(),
         }
+        get_llm_logger().debug({
+            "event": "orchestrator_build_prompt",
+            "type": "allocation",
+            "context_keys": list(context.keys()),
+        })
         prompt = self._build_allocation_prompt(context)
         response = self.llm.call(prompt=prompt, json_mode=True)
         new_weights = self._parse_strategy_weights(response)
         self.weights = new_weights
+        get_llm_logger().debug({
+            "event": "orchestrator_decision",
+            "type": "allocation",
+            "weights": vars(new_weights),
+        })
         # Record decision (best-effort)
         try:
             from time import time as _time
@@ -171,9 +182,21 @@ class LLMOrchestrator:
             "current_weights": vars(self.weights),
             "risk_tolerance": self._calculate_risk_tolerance(),
         }
+        get_llm_logger().debug({
+            "event": "orchestrator_build_prompt",
+            "type": "trade",
+            "strategy": strategy_name,
+            "context_keys": list(context.keys()),
+        })
         prompt = self._build_trade_prompt(context)
         response = self.llm.call(prompt=prompt, json_mode=True)
         decision = self._parse_trade_decision(response)
+        get_llm_logger().debug({
+            "event": "orchestrator_decision",
+            "type": "trade",
+            "strategy": strategy_name,
+            "decision": decision,
+        })
         # Record decision (best-effort)
         try:
             from time import time as _time
