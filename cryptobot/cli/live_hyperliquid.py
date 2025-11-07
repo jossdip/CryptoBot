@@ -5,6 +5,7 @@ import argparse
 from typing import Dict, Any, Optional
 import os
 import threading
+from pathlib import Path
 
 from cryptobot.core.config import AppConfig
 from cryptobot.core.logging import get_logger, setup_logging
@@ -55,8 +56,10 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
     # Startup safety checks: require LLM and exchange keys
     if bool(getattr(cfg.llm, "enabled", True)):
         if not os.getenv("LLM_API_KEY", "").strip():
+            project_root = Path(__file__).resolve().parents[2]
+            canonical_env = project_root / ".env"
             raise RuntimeError(
-                "LLM_API_KEY is missing. Create ~/.cryptobot/.env or ./.env with LLM_API_KEY and restart."
+                f"LLM_API_KEY is missing. Create {canonical_env} with LLM_API_KEY and restart."
             )
     if not mode_manager.wallet_address or not mode_manager.private_key:
         raise RuntimeError(

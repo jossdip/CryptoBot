@@ -1,30 +1,43 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 
-from dotenv import load_dotenv, find_dotenv
+from dotenv import load_dotenv
 
 
 def load_local_environment() -> None:
-    """Load environment variables from local files without overwriting existing env.
+    """Load environment variables from a single canonical location.
 
-    Load order:
-    1) ~/.cryptobot/.env (global, user-specific)
-    2) ./.env (project-level)
+    Canonical path: <project_root>/.env (derived from this package location),
+    which OVERRIDES any already-set variables. If that file does not exist,
+    we fallback to ~/.cryptobot/.env (also with override=True).
+    The resolved path is exposed via CRYPTOBOT_ENV_PATH for diagnostics.
     """
-    home_env = Path.home() / ".cryptobot" / ".env"
+    # Resolve project root from the installed package path, independent of CWD
+    project_root = Path(__file__).resolve().parents[2]
+    root_env = project_root / ".env"
+
+    loaded = False
     try:
-        load_dotenv(dotenv_path=home_env, override=False)
+        if root_env.exists():
+            load_dotenv(dotenv_path=root_env, override=True)
+            os.environ["CRYPTOBOT_ENV_PATH"] = str(root_env)
+            loaded = True
+        else:
+            # Legacy fallback for old setups
+            home_env = Path.home() / ".cryptobot" / ".env"
+            if home_env.exists():
+                load_dotenv(dotenv_path=home_env, override=True)
+                os.environ["CRYPTOBOT_ENV_PATH"] = str(home_env)
+                loaded = True
     except Exception:
-        # Best effort; ignore if file missing or unreadable
+        # Best-effort; do not crash on env loading issues
         pass
-    # Then project-level .env (explicitly resolve path from current working directory)
-    try:
-        project_env = find_dotenv(usecwd=True)
-        if project_env:
-            load_dotenv(dotenv_path=project_env, override=False)
-    except Exception:
-        pass
+
+    # If nothing was loaded, still indicate the intended canonical path
+    if not loaded:
+        os.environ.setdefault("CRYPTOBOT_ENV_PATH", str(root_env))
 
 
 
