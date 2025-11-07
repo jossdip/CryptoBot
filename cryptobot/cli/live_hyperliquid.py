@@ -35,6 +35,13 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
     log = get_logger()
 
     log.info("Starting Hyperliquid live runner...")
+    try:
+        log.info(f"Config: {config_path}")
+        env_path = os.getenv("CRYPTOBOT_ENV_PATH")
+        if env_path:
+            log.info(f"Env: {env_path}")
+    except Exception:
+        pass
     mode_manager = ModeManager(cfg)
 
     # Global runtime storage (singleton status)
@@ -61,6 +68,16 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
             raise RuntimeError(
                 f"LLM_API_KEY is missing. Create {canonical_env} with LLM_API_KEY and restart."
             )
+        else:
+            try:
+                log.info(
+                    f"LLM enabled | base_url={os.getenv('LLM_BASE_URL','')} | model={os.getenv('LLM_MODEL','')} | decision_interval={int(getattr(cfg.llm,'decision_interval_sec',30))}s"
+                )
+                mb = float(getattr(cfg.llm, 'monthly_budget_usd', 0.0))
+                if mb > 0:
+                    log.info(f"LLM budget: monthly_budget_usd={mb}")
+            except Exception:
+                pass
     if not mode_manager.wallet_address or not mode_manager.private_key:
         raise RuntimeError(
             "Hyperliquid keys missing. Set HYPERLIQUID_WALLET_ADDRESS and "
@@ -72,6 +89,28 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
         private_key=mode_manager.private_key,
         testnet=mode_manager.is_testnet(),
     )
+    try:
+        log.info(
+            f"Connected to Hyperliquid | network={'testnet' if mode_manager.is_testnet() else 'mainnet'} | wallet={getattr(broker, 'account_address', mode_manager.wallet_address)}"
+        )
+        # First portfolio snapshot
+        pf = broker.get_portfolio()
+        if pf.get("ok"):
+            resp = pf.get("response", {})
+            bal = None
+            eq = None
+            upnl = None
+            try:
+                bal = float(resp.get("balance", resp.get("cash", 0.0)))
+                eq = float(resp.get("equity", bal))
+                upnl = float(resp.get("unrealized_pnl", resp.get("unrealizedPnl", 0.0)))
+            except Exception:
+                pass
+            log.info(f"Portfolio: balance={bal if bal is not None else '?'} | equity={eq if eq is not None else '?'} | uPnL={upnl if upnl is not None else '?'}")
+        else:
+            log.warning(f"Portfolio snapshot unavailable: {pf.get('error')}")
+    except Exception:
+        pass
 
     # Record runtime start and clear any old stop requests
     try:
@@ -122,14 +161,15 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
 
     # Monitoring engine (optional)
     monitor_engine: MonitorEngine | None = None
-    if getattr(cfg, "monitor", None) and bool(cfg.monitor.enabled):
+    try:
         monitor_engine = MonitorEngine(
             broker=broker,
             orchestrator=orchestrator,
             performance_tracker=performance_tracker,
-            storage_path=cfg.monitor.storage_path,
+            storage_path=getattr(cfg.monitor, "storage_path", "~/.cryptobot/monitor.db"),
             interval_sec=int(getattr(cfg.monitor, "collect_interval_sec", 5)),
         )
+        log.info(f"Monitor engine started | storage={getattr(cfg.monitor, 'storage_path', '~/.cryptobot/monitor.db')} | interval={int(getattr(cfg.monitor, 'collect_interval_sec', 5))}s")
         # Wire LLM decisions into storage
         orchestrator.set_decision_sink(
             lambda d: monitor_engine.record_llm_decision(
@@ -174,6 +214,8 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
         except Exception:
             pass
         monitor_engine.start()
+    except Exception:
+        monitor_engine = None
     
     # Optimisation coûts: tracking pour allocation et budget
     last_allocation_ts = 0.0
@@ -263,6 +305,17 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                     sentiment_data=context.get("sentiment", {}),
                     performance_metrics=performance_tracker.feed_to_llm(),
                 )
+                try:
+                    log.info(
+                        "Strategy allocation updated: "
+                        + ", ".join([
+                            f"{n}={getattr(weights, n):.2f}" for n in [
+                                "market_making","momentum","scalping","arbitrage","breakout","sniping"
+                            ]
+                        ])
+                    )
+                except Exception:
+                    pass
                 last_allocation_ts = current_time
                 # Persist new weights for future warm start
                 try:
@@ -299,6 +352,10 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                     continue
                 # All strategies use context (which includes all signals: Reddit, Twitter, Polymarket, market cap, volume, etc.)
                 opportunities = detect_fn(context)
+                try:
+                    log.debug(f"{strategy_name}: detected {len(opportunities)} opportunities before scoring")
+                except Exception:
+                    pass
                 
                 # OPTIMISATION: Filtrer et scorer les opportunités avant appel LLM
                 scored_opportunities = []
@@ -310,6 +367,10 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                 # Trier par score décroissant et limiter le nombre
                 scored_opportunities.sort(key=lambda x: x[0], reverse=True)
                 scored_opportunities = scored_opportunities[:max_opportunities_per_cycle]
+                try:
+                    log.debug(f"{strategy_name}: {len(scored_opportunities)} opportunities after scoring/filtering (processed cap {max_opportunities_per_cycle})")
+                except Exception:
+                    pass
                 
                 # Traiter les meilleures opportunités
                 for score, opportunity in scored_opportunities:
@@ -332,6 +393,10 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                             size=float(decision.get("size_usd", 0.0)),
                             symbol=decision["symbol"],
                         )
+                        try:
+                            log.info(f"Executed {strategy_name} on {decision['symbol']} | size_usd={float(decision.get('size_usd', 0.0)):.2f} | conf={float(decision.get('confidence', 0.0)):.2f}")
+                        except Exception:
+                            pass
 
             # 5. Update performance tracking
             performance_tracker.update_positions(broker.get_portfolio())

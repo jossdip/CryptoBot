@@ -11,13 +11,16 @@ def setup_logging(log_dir: str = "logs", level: str = "INFO") -> None:
     Path(log_dir).mkdir(parents=True, exist_ok=True)
 
     _logger.remove()
-    _logger.add(
-        sink=lambda msg: print(msg, end=""),
-        level=level,
-        colorize=True,
-        backtrace=False,
-        diagnose=False,
-    )
+    # Optional console sink can be disabled for background threads in interactive shell
+    disable_console = str(os.getenv("CRYPTOBOT_DISABLE_CONSOLE_LOG", "0")).lower() in {"1", "true", "yes"}
+    if not disable_console:
+        _logger.add(
+            sink=lambda msg: print(msg, end=""),
+            level=level,
+            colorize=True,
+            backtrace=False,
+            diagnose=False,
+        )
     _logger.add(
         Path(log_dir) / "cryptobot.log",
         rotation="10 MB",

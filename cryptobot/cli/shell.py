@@ -64,14 +64,25 @@ class InteractiveShell:
         cfg = self.context.get("config")
         exchange = getattr(getattr(cfg, "general", None), "exchange_id", "hyperliquid") if cfg else "hyperliquid"
         completer = WordCompleter([
-            "start", "stop", "pause", "resume", "status", "monitor",
+            "start", "stop", "restart", "pause", "resume", "status", "monitor",
             "trades", "performance", "portfolio", "strategies", "weights",
             "risk", "config", "logs", "help", "exit", "quit", "clear", "version",
         ], ignore_case=True)
 
         while True:
             try:
-                prompt = build_prompt(exchange=exchange, status=self._status, fmt=getattr(getattr(cfg, "cli", None), "prompt_format", "[C4$H@{exchange}:{status}] > "))
+                # Build prompt from GLOBAL bot status (not local session)
+                try:
+                    rs = self._get_reporter().runtime_status() or {}
+                    last_hb = float(rs.get("last_heartbeat") or 0.0)
+                    runtime_status = str(rs.get("status") or "STOPPED")
+                    decision_interval = int(getattr(getattr(cfg, "llm", None), "decision_interval_sec", 30))
+                    threshold = max(15, decision_interval * 3)
+                    is_fresh = (time.time() - last_hb) < float(threshold)
+                    status_for_prompt = "ACTIVE" if (runtime_status == "ACTIVE" and is_fresh) else "STOPPED"
+                except Exception:
+                    status_for_prompt = "STOPPED"
+                prompt = build_prompt(exchange=exchange, status=status_for_prompt, fmt=getattr(getattr(cfg, "cli", None), "prompt_format", "[C4$H@{exchange}:{status}] > "))
                 # Mettre l'animation en pause pendant la saisie pour éviter tout flicker
                 pause_animated_logo()
                 try:
@@ -130,6 +141,9 @@ class InteractiveShell:
             if cmd == "stop" or cmd == "st":
                 self._stop_trading(args)
                 continue
+            if cmd == "restart" or cmd == "re":
+                self._restart_trading(args)
+                continue
             if cmd == "pause" or cmd == "p":
                 # cooperative pause not implemented; placeholder
                 self._status = "PAUSED"
@@ -159,7 +173,7 @@ class InteractiveShell:
 
     def _print_help(self) -> None:
         self.console.print(
-            "Commands: start, stop [--force], pause, resume, status, monitor, trades, performance, portfolio, strategies, weights, risk, config, logs, help, exit, clear, version"
+            "Commands: start, stop [--force], restart [--force], pause, resume, status, monitor, trades, performance, portfolio, strategies, weights, risk, config, logs, help, exit, clear, version"
         )
 
     def _trading_target(self) -> None:
@@ -184,16 +198,45 @@ class InteractiveShell:
     def _cmd_status(self) -> None:
         rep = self._get_reporter()
         rs = rep.runtime_status() or {}
-        status = str(rs.get("status") or "STOPPED")
         pid = rs.get("pid")
-        last_hb = rs.get("last_heartbeat")
+        last_hb = float(rs.get("last_heartbeat") or 0.0)
         started_at = rs.get("started_at")
-        self.console.print(f"Global Status: {status}"
-                           + (f" | pid={pid}" if pid else "")
-                           + (f" | last_hb={time.strftime('%H:%M:%S', time.localtime(float(last_hb))) }" if last_hb else "")
-                           + (f" | since={time.strftime('%H:%M:%S', time.localtime(float(started_at))) }" if started_at else ""))
-        # Local thread view
-        self.console.print(f"Local Session: {self._status}")
+        runtime_status = str(rs.get("status") or "STOPPED")
+        cfg = self.context.get("config")
+        decision_interval = int(getattr(getattr(cfg, "llm", None), "decision_interval_sec", 30))
+        threshold = max(15, decision_interval * 3)
+        is_fresh = (time.time() - last_hb) < float(threshold)
+        status_for_prompt = "ACTIVE" if (runtime_status == "ACTIVE" and is_fresh) else "STOPPED"
+        self.console.print(
+            f"Global Bot: {status_for_prompt}"
+            + (f" | pid={pid}" if pid else "")
+            + (f" | last_hb={time.strftime('%H:%M:%S', time.localtime(float(last_hb))) }" if last_hb else "")
+            + (f" | since={time.strftime('%H:%M:%S', time.localtime(float(started_at))) }" if started_at else "")
+        )
+        # Network/wallet
+        testnet = rs.get("testnet")
+        wallet = rs.get("wallet_address")
+        if wallet is not None or testnet is not None:
+            net = "testnet" if testnet else "mainnet"
+            self.console.print(f"Network: {net} | Wallet: {wallet}")
+        # LLM config summary
+        try:
+            llm = getattr(cfg, "llm")
+            self.console.print(
+                f"LLM: {'enabled' if bool(getattr(llm, 'enabled', True)) else 'disabled'} | model={getattr(llm, 'model', '')} | base_url={getattr(llm, 'base_url', '')}"
+            )
+        except Exception:
+            pass
+        # Latest portfolio snapshot
+        latest = rep.portfolio_summary() or {}
+        if latest:
+            try:
+                bal = float(latest.get("balance", 0.0))
+                eq = float(latest.get("equity", 0.0))
+                upnl = float(latest.get("unrealized_pnl", 0.0))
+                self.console.print(f"Portfolio: balance={bal:.2f} | equity={eq:.2f} | uPnL={upnl:.2f}")
+            except Exception:
+                pass
 
     def _start_trading(self) -> None:
         # Prevent starting if a global active instance exists with a fresh heartbeat
@@ -211,9 +254,10 @@ class InteractiveShell:
             self.console.print("Already running in this session")
             return
         self._stop_event.clear()
+        # Suppress console logging in background trading thread; logs still go to file
+        os.environ["CRYPTOBOT_DISABLE_CONSOLE_LOG"] = "1"
         self._running_thread = threading.Thread(target=self._trading_target, daemon=True)
         self._running_thread.start()
-        self._status = "ACTIVE"
         self.console.print("Trading started")
 
     def _stop_trading(self, args: Optional[List[str]] = None) -> None:
@@ -238,6 +282,35 @@ class InteractiveShell:
             except Exception as e:
                 self.console.print(f"[red]Force stop failed:[/red] {e}")
         self._status = "STOPPED"
+
+    def _restart_trading(self, args: Optional[List[str]] = None) -> None:
+        # Graceful stop first
+        self.console.print("Restarting bot: stopping...")
+        try:
+            self._stop_trading(args)
+        except Exception:
+            pass
+        # Wait until global instance is stopped (heartbeat stale or status STOPPED)
+        cfg = self.context.get("config")
+        decision_interval = int(getattr(getattr(cfg, "llm", None), "decision_interval_sec", 30)) if cfg else 30
+        threshold = max(15, decision_interval * 3)
+        deadline = time.time() + float(threshold)
+        try:
+            while time.time() < deadline:
+                # Join local thread if any
+                if self._running_thread and self._running_thread.is_alive():
+                    self._running_thread.join(timeout=0.2)
+                rs = self._get_reporter().runtime_status() or {}
+                last_hb = float(rs.get("last_heartbeat") or 0.0)
+                runtime_status = str(rs.get("status") or "STOPPED")
+                fresh = (time.time() - last_hb) < float(threshold)
+                if runtime_status != "ACTIVE" or not fresh:
+                    break
+                time.sleep(0.3)
+        except Exception:
+            pass
+        self.console.print("Restarting bot: starting...")
+        self._start_trading()
 
     # Simple command handlers
     def _cmd_trades(self, args: List[str]) -> None:
