@@ -20,6 +20,10 @@ try:
 except Exception as _e:
     Account = None  # type: ignore[assignment]
 try:
+    from hyperliquid.info import Info as HyperliquidInfo  # type: ignore
+except Exception:
+    HyperliquidInfo = None  # type: ignore[assignment]
+try:
     # Chain is optional; use if available to signal testnet/mainnet
     from hyperliquid.info import Chain as _HLChain  # type: ignore
 except Exception:
@@ -163,17 +167,50 @@ class HyperliquidBroker:
 
     def get_portfolio(self) -> Dict[str, Any]:
         """Get current portfolio state: balances, positions, and PnL."""
+        # Try multiple strategies depending on SDK version
+        # 1) If Exchange exposes a portfolio-like API
         try:
-            # response = self.client.get_portfolio()
-            response: Dict[str, Any] = self.client.get_portfolio()  # type: ignore[assignment]
-            return {
-                "ok": True,
-                "response": response,
-                "ts": time.time(),
-            }
-        except Exception as e:  # pragma: no cover - SDK runtime path
+            if hasattr(self.client, "get_portfolio"):
+                response: Dict[str, Any] = self.client.get_portfolio()  # type: ignore[assignment]
+                return {"ok": True, "response": response, "ts": time.time()}
+        except Exception as e:
+            log.debug(f"Exchange.get_portfolio not available: {e}")
+        # 2) Use Info client user_state(address)
+        try:
+            if HyperliquidInfo is not None:
+                info_client = None
+                last_err: Optional[Exception] = None
+                # Try a few constructor variants
+                for args, kwargs in (
+                    ((), {"base_url": self.conn.base_url}),
+                    ((self.conn.base_url,), {}),
+                    ((), {}),
+                ):
+                    try:
+                        info_client = HyperliquidInfo(*args, **kwargs)  # type: ignore[misc]
+                        break
+                    except Exception as e:
+                        last_err = e
+                        continue
+                if info_client is None:
+                    raise last_err or RuntimeError("Failed to construct Info client")
+                # Call user_state
+                for call in (
+                    lambda: info_client.user_state(self.conn.wallet_address),  # type: ignore[attr-defined]
+                    lambda: info_client.user_state(address=self.conn.wallet_address),  # type: ignore[attr-defined]
+                ):
+                    try:
+                        resp = call()
+                        return {"ok": True, "response": resp, "ts": time.time()}
+                    except Exception as e:
+                        last_err = e
+                        continue
+                raise last_err or RuntimeError("user_state unavailable")
+        except Exception as e:
             log.error(f"Failed to fetch portfolio from Hyperliquid: {e}")
             return {"ok": False, "error": str(e), "ts": time.time()}
+        # 3) Fallback: not available
+        return {"ok": False, "error": "Portfolio API not available in this SDK", "ts": time.time()}
 
     def get_funding_rate(self, symbol: str) -> float:
         """Return current funding rate for a symbol (% per funding interval)."""
