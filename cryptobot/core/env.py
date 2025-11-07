@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
 
 def load_local_environment() -> None:
@@ -18,8 +18,13 @@ def load_local_environment() -> None:
     except Exception:
         # Best effort; ignore if file missing or unreadable
         pass
-    # Then project-level .env
-    load_dotenv(override=False)
+    # Then project-level .env (explicitly resolve path from current working directory)
+    try:
+        project_env = find_dotenv(usecwd=True)
+        if project_env:
+            load_dotenv(dotenv_path=project_env, override=False)
+    except Exception:
+        pass
 
 
 
