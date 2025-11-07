@@ -311,23 +311,40 @@ class InteractiveShell:
             self._stop_trading(args)
         except Exception:
             pass
-        # Wait until global instance is stopped (heartbeat stale or status STOPPED)
+        # Short, non-blocking wait for stop (max ~5s), then force if needed
         cfg = self.context.get("config")
         decision_interval = int(getattr(getattr(cfg, "llm", None), "decision_interval_sec", 30)) if cfg else 30
         threshold = max(15, decision_interval * 3)
-        deadline = time.time() + float(threshold)
+        force_requested = bool(args and any(a in {"--force", "-f"} for a in args))
+        deadline = time.time() + 5.0
         try:
             while time.time() < deadline:
-                # Join local thread if any
                 if self._running_thread and self._running_thread.is_alive():
-                    self._running_thread.join(timeout=0.2)
+                    self._running_thread.join(timeout=0.1)
                 rs = self._get_reporter().runtime_status() or {}
                 last_hb = float(rs.get("last_heartbeat") or 0.0)
                 runtime_status = str(rs.get("status") or "STOPPED")
                 fresh = (time.time() - last_hb) < float(threshold)
                 if runtime_status != "ACTIVE" or not fresh:
                     break
-                time.sleep(0.3)
+                time.sleep(0.2)
+            else:
+                # Still active after short grace
+                if not force_requested:
+                    try:
+                        rs = self._get_reporter().runtime_status() or {}
+                        pid = int(rs.get("pid")) if rs.get("pid") is not None else None
+                        if pid:
+                            os.kill(pid, signal.SIGTERM)
+                            self.console.print(f"Sent SIGTERM to pid {pid} (auto-force)")
+                            # Clear status so new start isn't blocked by fresh heartbeat
+                            try:
+                                self._get_storage().set_runtime_stopped()
+                            except Exception:
+                                pass
+                            time.sleep(0.2)
+                    except Exception:
+                        pass
         except Exception:
             pass
         self.console.print("Restarting bot: starting...")
