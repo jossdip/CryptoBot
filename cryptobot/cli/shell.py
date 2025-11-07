@@ -30,6 +30,7 @@ from cryptobot.cli.commands.base import Command
 from cryptobot.monitor.storage import StorageManager
 from cryptobot.monitor.reporter import ReportGenerator
 from cryptobot.monitor.display import render_trades, render_portfolio
+from pathlib import Path
 
 
 class InteractiveShell:
@@ -67,7 +68,7 @@ class InteractiveShell:
         cfg = self.context.get("config")
         exchange = getattr(getattr(cfg, "general", None), "exchange_id", "hyperliquid") if cfg else "hyperliquid"
         completer = WordCompleter([
-            "start", "stop", "restart", "pause", "resume", "status", "monitor",
+            "start", "stop", "restart", "pause", "resume", "status", "ps", "pids", "monitor",
             "trades", "performance", "portfolio", "strategies", "weights",
             "risk", "config", "logs", "help", "exit", "quit", "clear", "version",
         ], ignore_case=True)
@@ -119,6 +120,9 @@ class InteractiveShell:
                 continue
             if cmd == "status" or cmd == "stat":
                 self._cmd_status()
+                continue
+            if cmd in {"ps", "pids"}:
+                self._cmd_ps()
                 continue
             if cmd == "trades" or cmd == "t":
                 self._cmd_trades(args)
@@ -246,6 +250,15 @@ class InteractiveShell:
             self.console.print(f"Monitor DB: {storage.db_path}")
         except Exception:
             pass
+        # Show detected processes
+        try:
+            pids = self._list_bot_pids()
+            if pids:
+                self.console.print(f"Processes detected: {len(pids)} -> {', '.join(str(p) for p in pids)}")
+            else:
+                self.console.print("Processes detected: 0")
+        except Exception:
+            pass
 
     def _start_trading(self) -> None:
         # Prevent starting if a global active instance exists with a fresh heartbeat
@@ -270,16 +283,40 @@ class InteractiveShell:
             # (uses existing CRYPTOBOT_MONITOR_DB env if provided)
             os.makedirs("logs", exist_ok=True)
             out_path = os.path.join("logs", "runner.out")
+            cmd = [sys.executable, "-m", "cryptobot.cli.live_hyperliquid", "--config", str(cfg_path)]
             with open(out_path, "ab") as out:
                 proc = subprocess.Popen(
-                    [sys.executable, "-m", "cryptobot.cli.live_hyperliquid", "--config", str(cfg_path)],
+                    cmd,
                     stdout=out,
                     stderr=out,
                     env=env,
                     start_new_session=True,
                 )
-                self._running_pid = int(proc.pid)
-                self.console.print(f"Trading started (pid={self._running_pid})")
+            self._running_pid = int(proc.pid)
+            # Persist run metadata to interoperate with deploy scripts and allow external restart
+            try:
+                Path(".").joinpath(".run_pid").write_text(str(self._running_pid))
+                Path(".").joinpath(".run_cmd").write_text(" ".join(shlex.quote(c) for c in cmd))
+                Path(".").joinpath(".run_session").write_text("cryptobot")
+            except Exception:
+                pass
+            self.console.print(f"Trading started (pid={self._running_pid})")
+            # Wait briefly for the runtime to flip ACTIVE (best-effort)
+            try:
+                cfg = self.context.get("config")
+                decision_interval = int(getattr(getattr(cfg, "llm", None), "decision_interval_sec", 30)) if cfg else 30
+                threshold = max(15, decision_interval * 3)
+                deadline = time.time() + 8.0
+                while time.time() < deadline:
+                    rs = self._get_reporter().runtime_status() or {}
+                    last_hb = float(rs.get("last_heartbeat") or 0.0)
+                    status = str(rs.get("status") or "STOPPED")
+                    fresh = (time.time() - last_hb) < float(threshold)
+                    if status == "ACTIVE" and fresh:
+                        break
+                    time.sleep(0.2)
+            except Exception:
+                pass
         except Exception as e:
             self.console.print(f"[red]Failed to start bot:[/red] {e}")
 
@@ -344,13 +381,64 @@ class InteractiveShell:
                                 self._get_storage().set_runtime_stopped()
                             except Exception:
                                 pass
-                            time.sleep(0.2)
+                            # Wait up to 10s for process to exit, then escalate to SIGKILL if needed
+                            waited = 0.0
+                            while waited < 10.0:
+                                try:
+                                    os.kill(pid, 0)
+                                    time.sleep(0.5)
+                                    waited += 0.5
+                                except ProcessLookupError:
+                                    break
+                                except Exception:
+                                    time.sleep(0.5)
+                                    waited += 0.5
+                            try:
+                                os.kill(pid, 0)
+                                os.kill(pid, signal.SIGKILL)
+                                self.console.print(f"Sent SIGKILL to pid {pid}")
+                            except ProcessLookupError:
+                                pass
+                            except Exception:
+                                pass
                     except Exception:
                         pass
         except Exception:
             pass
-        self.console.print("Restarting bot: starting...")
-        self._start_trading()
+        # If the bot was launched via deploy scripts, prefer delegating to them for a clean restart
+        used_external = False
+        try:
+            repo_root = Path(__file__).resolve().parents[2]
+            script = repo_root / "deploy" / "restart_if_running.sh"
+            if script.exists() and os.access(str(script), os.X_OK):
+                res = subprocess.run(["bash", str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                out = res.stdout.decode(errors="ignore").strip()
+                err = res.stderr.decode(errors="ignore").strip()
+                if out:
+                    self.console.print(out)
+                if err:
+                    self.console.print(f"[red]{err}[/red]")
+                used_external = (res.returncode == 0)
+        except Exception:
+            used_external = False
+        if not used_external:
+            self.console.print("Restarting bot: starting...")
+            self._start_trading()
+        # Post-start verification: ensure it became ACTIVE shortly after
+        try:
+            verify_deadline = time.time() + 8.0
+            while time.time() < verify_deadline:
+                rs = self._get_reporter().runtime_status() or {}
+                last_hb = float(rs.get("last_heartbeat") or 0.0)
+                runtime_status = str(rs.get("status") or "STOPPED")
+                fresh = (time.time() - last_hb) < float(threshold)
+                if runtime_status == "ACTIVE" and fresh:
+                    break
+                time.sleep(0.25)
+            else:
+                self.console.print("[yellow]Warning:[/yellow] Bot did not report ACTIVE shortly after restart. Check logs/runner.out and logs/cryptobot.log.")
+        except Exception:
+            pass
 
     # Simple command handlers
     def _cmd_trades(self, args: List[str]) -> None:
@@ -416,5 +504,62 @@ class InteractiveShell:
                 self.console.print(ln.rstrip())
         except FileNotFoundError:
             self.console.print("No logs found at logs/cryptobot.log")
+
+    def _list_bot_pids(self) -> List[int]:
+        pids: List[int] = []
+        try:
+            # Try to detect via pgrep first
+            pattern = r"cryptobot-live-hl|cryptobot-live|cryptobot\.cli\.live_hyperliquid|cryptobot\.cli\.live"
+            res = subprocess.run(["pgrep", "-f", pattern], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            if res.returncode == 0:
+                for line in res.stdout.decode().strip().splitlines():
+                    try:
+                        pids.append(int(line.strip()))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        # Add known pid files if present
+        try:
+            run_pid_path = Path(".").joinpath(".run_pid")
+            if run_pid_path.exists():
+                pid_txt = run_pid_path.read_text().strip()
+                if pid_txt.isdigit():
+                    pids.append(int(pid_txt))
+        except Exception:
+            pass
+        # De-duplicate
+        return sorted(list({p for p in pids if p > 0}))
+
+    def _cmd_ps(self) -> None:
+        # Show runtime + process list to spot duplicates
+        try:
+            rep = self._get_reporter()
+            rs = rep.runtime_status() or {}
+            pid = rs.get("pid")
+            status = rs.get("status")
+            last_hb = rs.get("last_heartbeat")
+            self.console.print(f"Runtime DB: status={status} pid={pid} last_hb={last_hb}")
+        except Exception:
+            pass
+        try:
+            pids = self._list_bot_pids()
+            if not pids:
+                self.console.print("No matching bot processes found.")
+                return
+            self.console.print(f"Found {len(pids)} process(es): {', '.join(str(p) for p in pids)}")
+            # If a DB pid exists, highlight if it mismatches
+            try:
+                rs = self._get_reporter().runtime_status() or {}
+                db_pid = int(rs.get("pid")) if rs.get("pid") is not None else None
+            except Exception:
+                db_pid = None
+            for p in pids:
+                mark = " (DB pid)" if (db_pid and p == db_pid) else ""
+                self.console.print(f"- pid {p}{mark}")
+            if len(pids) > 1:
+                self.console.print("[yellow]Warning:[/yellow] Multiple bot processes detected. Consider `restart --force`.")
+        except Exception as e:
+            self.console.print(f"[red]ps failed:[/red] {e}")
 
 
