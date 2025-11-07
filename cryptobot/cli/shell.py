@@ -31,6 +31,7 @@ from cryptobot.monitor.storage import StorageManager
 from cryptobot.monitor.reporter import ReportGenerator
 from cryptobot.monitor.display import render_trades, render_portfolio
 from pathlib import Path
+from typing import List
 
 
 class InteractiveShell:
@@ -80,10 +81,22 @@ class InteractiveShell:
                     rs = self._get_reporter().runtime_status() or {}
                     last_hb = float(rs.get("last_heartbeat") or 0.0)
                     runtime_status = str(rs.get("status") or "STOPPED")
+                    pid_for_status = rs.get("pid")
                     decision_interval = int(getattr(getattr(cfg, "llm", None), "decision_interval_sec", 30))
                     threshold = max(15, decision_interval * 3)
                     is_fresh = (time.time() - last_hb) < float(threshold)
                     status_for_prompt = "ACTIVE" if (runtime_status == "ACTIVE" and is_fresh) else "STOPPED"
+                    # Heuristic: if heartbeat is stale but the pid is alive, treat as ACTIVE and refresh heartbeat
+                    if status_for_prompt == "STOPPED" and pid_for_status:
+                        try:
+                            if self._pid_alive(int(pid_for_status)):
+                                try:
+                                    self._get_storage().record_runtime_heartbeat(pid=int(pid_for_status))
+                                except Exception:
+                                    pass
+                                status_for_prompt = "ACTIVE"
+                        except Exception:
+                            pass
                 except Exception:
                     status_for_prompt = "STOPPED"
                 prompt = build_prompt(exchange=exchange, status=status_for_prompt, fmt=getattr(getattr(cfg, "cli", None), "prompt_format", "[C4$H@{exchange}:{status}] > "))
@@ -217,6 +230,22 @@ class InteractiveShell:
         threshold = max(15, decision_interval * 3)
         is_fresh = (time.time() - last_hb) < float(threshold)
         status_for_prompt = "ACTIVE" if (runtime_status == "ACTIVE" and is_fresh) else "STOPPED"
+        # Heuristic: if heartbeat is stale but the pid is alive, consider ACTIVE and refresh heartbeat immediately
+        if status_for_prompt == "STOPPED" and pid:
+            try:
+                if self._pid_alive(int(pid)):
+                    try:
+                        self._get_storage().record_runtime_heartbeat(pid=int(pid))
+                        # Recompute freshness after bump
+                        rs2 = rep.runtime_status() or {}
+                        last_hb2 = float(rs2.get("last_heartbeat") or 0.0)
+                        is_fresh2 = (time.time() - last_hb2) < float(threshold)
+                        if is_fresh2:
+                            status_for_prompt = "ACTIVE"
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         self.console.print(
             f"Global Bot: {status_for_prompt}"
             + (f" | pid={pid}" if pid else "")
@@ -282,6 +311,11 @@ class InteractiveShell:
             env["CRYPTOBOT_DISABLE_CONSOLE_LOG"] = "1"
             # Enable in-process supervisor in the runner so it auto-restarts if it exits unexpectedly
             env["CRYPTOBOT_AUTO_RESTART"] = "1"
+            # Force the runner to use the same monitor DB as the CLI to avoid status desync
+            try:
+                env["CRYPTOBOT_MONITOR_DB"] = self._get_storage().db_path
+            except Exception:
+                pass
             # Ensure monitor DB is the same between shells and runner if set
             # (uses existing CRYPTOBOT_MONITOR_DB env if provided)
             os.makedirs("logs", exist_ok=True)
@@ -533,6 +567,15 @@ class InteractiveShell:
             pass
         # De-duplicate
         return sorted(list({p for p in pids if p > 0}))
+
+    def _pid_alive(self, pid: int) -> bool:
+        try:
+            os.kill(int(pid), 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except Exception:
+            return False
 
     def _cmd_ps(self) -> None:
         # Show runtime + process list to spot duplicates
