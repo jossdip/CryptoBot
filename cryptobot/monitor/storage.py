@@ -6,6 +6,7 @@ import sqlite3
 import threading
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+import time
 
 
 def _expand(path: str) -> str:
@@ -21,6 +22,7 @@ class StorageManager:
       - llm_decisions
       - performance_metrics
       - weights_history
+      - runtime_status (singleton row id=1)
     """
 
     def __init__(self, db_path: str = "~/.cryptobot/monitor.db") -> None:
@@ -102,6 +104,28 @@ class StorageManager:
                     breakout REAL,
                     sniping REAL
                 );
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS runtime_status (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    pid INTEGER,
+                    status TEXT,
+                    started_at REAL,
+                    last_heartbeat REAL,
+                    desired_stop INTEGER DEFAULT 0,
+                    config_path TEXT,
+                    testnet INTEGER,
+                    wallet_address TEXT
+                );
+                """
+            )
+            # Ensure a singleton row exists
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO runtime_status (id, status, desired_stop)
+                VALUES (1, 'STOPPED', 0)
                 """
             )
 
@@ -344,6 +368,76 @@ class StorageManager:
                 }
             )
         return out
+
+    # Runtime status helpers (single instance coordination)
+    def set_runtime_started(self, *, pid: int, config_path: str, testnet: bool, wallet_address: str) -> None:
+        now = time.time()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO runtime_status (id, pid, status, started_at, last_heartbeat, desired_stop, config_path, testnet, wallet_address)
+                VALUES (1, ?, 'ACTIVE', ?, ?, 0, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    pid=excluded.pid,
+                    status='ACTIVE',
+                    started_at=excluded.started_at,
+                    last_heartbeat=excluded.last_heartbeat,
+                    desired_stop=0,
+                    config_path=excluded.config_path,
+                    testnet=excluded.testnet,
+                    wallet_address=excluded.wallet_address
+                """,
+                (int(pid), float(now), float(now), str(config_path), 1 if testnet else 0, str(wallet_address)),
+            )
+
+    def set_runtime_stopped(self) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE runtime_status
+                SET status='STOPPED', last_heartbeat=? , desired_stop=0
+                WHERE id=1
+                """,
+                (float(time.time()),),
+            )
+
+    def record_runtime_heartbeat(self, *, pid: Optional[int] = None) -> None:
+        with self._lock, self._conn:
+            if pid is None:
+                self._conn.execute(
+                    "UPDATE runtime_status SET last_heartbeat=?, status='ACTIVE' WHERE id=1",
+                    (float(time.time()),),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE runtime_status SET last_heartbeat=?, status='ACTIVE', pid=? WHERE id=1",
+                    (float(time.time()), int(pid)),
+                )
+
+    def get_runtime_status(self) -> Optional[Dict[str, Any]]:
+        row = self._conn.execute(
+            "SELECT pid, status, started_at, last_heartbeat, desired_stop, config_path, testnet, wallet_address FROM runtime_status WHERE id=1"
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "pid": int(row[0]) if row[0] is not None else None,
+            "status": str(row[1]) if row[1] is not None else "STOPPED",
+            "started_at": float(row[2]) if row[2] is not None else None,
+            "last_heartbeat": float(row[3]) if row[3] is not None else None,
+            "desired_stop": bool(row[4]) if row[4] is not None else False,
+            "config_path": str(row[5]) if row[5] is not None else None,
+            "testnet": bool(row[6]) if row[6] is not None else None,
+            "wallet_address": str(row[7]) if row[7] is not None else None,
+        }
+
+    def request_runtime_stop(self) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE runtime_status SET desired_stop=1 WHERE id=1")
+
+    def clear_runtime_stop_request(self) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE runtime_status SET desired_stop=0 WHERE id=1")
 
     def close(self) -> None:
         with self._lock:

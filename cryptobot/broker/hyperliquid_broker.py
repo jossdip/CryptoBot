@@ -96,12 +96,17 @@ class HyperliquidBroker:
                 )
         except Exception:
             pass
+
+        # Keep references for later (Info queries, etc.)
+        self._wallet_obj = wallet_obj
+        self.account_address = wallet_obj.address
+
         # Initialize client with wallet object and base_url; pass account_address for clarity
         try:
             self.client = HyperliquidClient(
                 wallet_obj,
                 base_url=self.conn.base_url,
-                account_address=self.conn.wallet_address or wallet_obj.address,
+                account_address=self.conn.wallet_address or self.account_address,
             )
         except TypeError:
             # Fallback: without account_address
@@ -165,14 +170,116 @@ class HyperliquidBroker:
             log.error(f"Failed to place order on Hyperliquid: {e}")
             return {"ok": False, "error": str(e), "ts": time.time()}
 
+    def _normalize_user_state(self, data: Any) -> Dict[str, Any]:
+        """Best-effort normalization of Info.user_state payload into a common schema.
+        Returns a dict with keys: balance, equity, unrealized_pnl, positions.
+        """
+        out: Dict[str, Any] = {"balance": 0.0, "equity": 0.0, "unrealized_pnl": 0.0, "positions": {}}
+
+        def _dig_first_number(obj: Any, keys: tuple[str, ...]) -> Optional[float]:
+            try:
+                if isinstance(obj, dict):
+                    for k in keys:
+                        if k in obj:
+                            try:
+                                return float(obj[k])
+                            except Exception:
+                                pass
+                    # Search nested dictionaries one level deep
+                    for v in obj.values():
+                        if isinstance(v, dict):
+                            val = _dig_first_number(v, keys)
+                            if val is not None:
+                                return val
+                return None
+            except Exception:
+                return None
+
+        # Try common summary fields for equity / balance / unrealized PnL
+        equity = _dig_first_number(data, ("accountValue", "equity", "totalAccountValue", "marginBalance"))
+        balance = _dig_first_number(data, ("availableMargin", "availableBalance", "cash", "balance"))
+        unreal = _dig_first_number(data, ("unrealizedPnl", "totalUnrealizedPnl", "unrealized_pnl"))
+
+        if equity is not None:
+            out["equity"] = float(equity)
+        if balance is not None:
+            out["balance"] = float(balance)
+        if unreal is not None:
+            out["unrealized_pnl"] = float(unreal)
+
+        # Positions: look for common containers
+        try:
+            pos_container: Any = None
+            for key in ("perpPositions", "openPositions", "positions", "positionsMap"):
+                if isinstance(data, dict) and key in data:
+                    pos_container = data[key]
+                    break
+            positions: Dict[str, Any] = {}
+            if isinstance(pos_container, list):
+                for p in pos_container:
+                    if not isinstance(p, dict):
+                        continue
+                    sym = str(p.get("symbol") or p.get("coin") or "")
+                    if not sym:
+                        continue
+                    qty_val = None
+                    for qk in ("sz", "size", "qty", "positionSize", "contracts"):
+                        if qk in p:
+                            try:
+                                qty_val = float(p[qk])
+                                break
+                            except Exception:
+                                pass
+                    if qty_val is None:
+                        continue
+                    avg_px = 0.0
+                    for pk in ("entryPx", "avgEntry", "entryPrice", "avg_price"):
+                        if pk in p:
+                            try:
+                                avg_px = float(p[pk])
+                                break
+                            except Exception:
+                                pass
+                    positions[sym] = {"symbol": sym, "qty": float(qty_val), "avg_price": float(avg_px)}
+            elif isinstance(pos_container, dict):
+                for sym, p in pos_container.items():
+                    try:
+                        qty_val = None
+                        if isinstance(p, dict):
+                            for qk in ("sz", "size", "qty", "positionSize", "contracts"):
+                                if qk in p:
+                                    qty_val = float(p[qk])
+                                    break
+                            avg_px = 0.0
+                            for pk in ("entryPx", "avgEntry", "entryPrice", "avg_price"):
+                                if pk in p:
+                                    avg_px = float(p[pk])
+                                    break
+                        else:
+                            avg_px = 0.0
+                        if qty_val is not None:
+                            positions[str(sym)] = {"symbol": str(sym), "qty": float(qty_val), "avg_price": float(avg_px)}
+                    except Exception:
+                        continue
+            out["positions"] = positions
+        except Exception:
+            # Leave positions empty if parsing fails
+            pass
+
+        return out
+
     def get_portfolio(self) -> Dict[str, Any]:
         """Get current portfolio state: balances, positions, and PnL."""
         # Try multiple strategies depending on SDK version
         # 1) If Exchange exposes a portfolio-like API
         try:
-            if hasattr(self.client, "get_portfolio"):
-                response: Dict[str, Any] = self.client.get_portfolio()  # type: ignore[assignment]
-                return {"ok": True, "response": response, "ts": time.time()}
+            candidate = getattr(self.client, "get_portfolio", None)
+            if callable(candidate):
+                try:
+                    response: Dict[str, Any] = candidate()  # type: ignore[assignment]
+                    return {"ok": True, "response": response, "ts": time.time()}
+                except Exception as e:
+                    log.debug(f"Exchange.get_portfolio call failed: {e}")
         except Exception as e:
             log.debug(f"Exchange.get_portfolio not available: {e}")
         # 2) Use Info client user_state(address)
@@ -194,14 +301,15 @@ class HyperliquidBroker:
                         continue
                 if info_client is None:
                     raise last_err or RuntimeError("Failed to construct Info client")
-                # Call user_state
+                # Call user_state using the derived address (source of truth)
                 for call in (
-                    lambda: info_client.user_state(self.conn.wallet_address),  # type: ignore[attr-defined]
-                    lambda: info_client.user_state(address=self.conn.wallet_address),  # type: ignore[attr-defined]
+                    lambda: info_client.user_state(self.account_address),  # type: ignore[attr-defined]
+                    lambda: info_client.user_state(address=self.account_address),  # type: ignore[attr-defined]
                 ):
                     try:
-                        resp = call()
-                        return {"ok": True, "response": resp, "ts": time.time()}
+                        raw = call()
+                        normalized = self._normalize_user_state(raw)
+                        return {"ok": True, "response": normalized, "ts": time.time()}
                     except Exception as e:
                         last_err = e
                         continue

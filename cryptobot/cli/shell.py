@@ -5,6 +5,8 @@ import shlex
 import threading
 import time
 from typing import Any, Dict, List, Optional
+import os
+import signal
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
@@ -102,7 +104,7 @@ class InteractiveShell:
                 self.console.print("C4$H M4CH1N3 Interactive v0.1.0")
                 continue
             if cmd == "status" or cmd == "stat":
-                self.console.print(f"Status: {self._status}")
+                self._cmd_status()
                 continue
             if cmd == "trades" or cmd == "t":
                 self._cmd_trades(args)
@@ -126,7 +128,7 @@ class InteractiveShell:
                 self._start_trading()
                 continue
             if cmd == "stop" or cmd == "st":
-                self._stop_trading()
+                self._stop_trading(args)
                 continue
             if cmd == "pause" or cmd == "p":
                 # cooperative pause not implemented; placeholder
@@ -157,7 +159,7 @@ class InteractiveShell:
 
     def _print_help(self) -> None:
         self.console.print(
-            "Commands: start, stop, pause, resume, status, monitor, trades, performance, portfolio, strategies, weights, risk, config, logs, help, exit, clear, version"
+            "Commands: start, stop [--force], pause, resume, status, monitor, trades, performance, portfolio, strategies, weights, risk, config, logs, help, exit, clear, version"
         )
 
     def _trading_target(self) -> None:
@@ -165,15 +167,48 @@ class InteractiveShell:
             # Run live hyperliquid loop in this background thread
             from cryptobot.cli.live_hyperliquid import run_live
             cfg_path = self.context.get("config_path") or "configs/live.hyperliquid.yaml"
-            run_live(cfg_path)
+            run_live(cfg_path, stop_event=self._stop_event)
         except Exception as e:
             self.console.print(f"[red]Trading loop crashed:[/red] {e}")
         finally:
             self._status = "STOPPED"
 
+    def _get_storage(self) -> StorageManager:
+        cfg = self.context.get("config")
+        storage_path = cfg.monitor.storage_path if cfg and getattr(cfg, "monitor", None) else "~/.cryptobot/monitor.db"
+        return StorageManager(storage_path)
+
+    def _get_reporter(self) -> ReportGenerator:
+        return ReportGenerator(self._get_storage())
+
+    def _cmd_status(self) -> None:
+        rep = self._get_reporter()
+        rs = rep.runtime_status() or {}
+        status = str(rs.get("status") or "STOPPED")
+        pid = rs.get("pid")
+        last_hb = rs.get("last_heartbeat")
+        started_at = rs.get("started_at")
+        self.console.print(f"Global Status: {status}"
+                           + (f" | pid={pid}" if pid else "")
+                           + (f" | last_hb={time.strftime('%H:%M:%S', time.localtime(float(last_hb))) }" if last_hb else "")
+                           + (f" | since={time.strftime('%H:%M:%S', time.localtime(float(started_at))) }" if started_at else ""))
+        # Local thread view
+        self.console.print(f"Local Session: {self._status}")
+
     def _start_trading(self) -> None:
+        # Prevent starting if a global active instance exists with a fresh heartbeat
+        try:
+            rs = self._get_reporter().runtime_status() or {}
+            last_hb = float(rs.get("last_heartbeat") or 0.0)
+            status = str(rs.get("status") or "STOPPED")
+            if status == "ACTIVE" and (time.time() - last_hb) < 30.0:
+                self.console.print("Already running globally. Not starting a new instance.")
+                return
+        except Exception:
+            pass
+
         if self._running_thread and self._running_thread.is_alive():
-            self.console.print("Already running")
+            self.console.print("Already running in this session")
             return
         self._stop_event.clear()
         self._running_thread = threading.Thread(target=self._trading_target, daemon=True)
@@ -181,19 +216,30 @@ class InteractiveShell:
         self._status = "ACTIVE"
         self.console.print("Trading started")
 
-    def _stop_trading(self) -> None:
-        # Best-effort: current live loop listens to process signals; here we just flag and rely on user Ctrl+C
+    def _stop_trading(self, args: Optional[List[str]] = None) -> None:
+        # Signal the background loop to stop cooperatively (local + remote)
+        try:
+            storage = self._get_storage()
+            storage.request_runtime_stop()
+        except Exception:
+            pass
         if self._running_thread and self._running_thread.is_alive():
-            self.console.print("Requesting stop (Ctrl+C in background loop if needed)...")
+            self._stop_event.set()
+            self.console.print("Requesting local stop...")
+        # Optional --force to kill remote pid
+        force = bool(args and any(a in {"--force", "-f"} for a in args))
+        if force:
+            try:
+                rs = self._get_reporter().runtime_status() or {}
+                pid = int(rs.get("pid")) if rs.get("pid") is not None else None
+                if pid:
+                    os.kill(pid, signal.SIGTERM)
+                    self.console.print(f"Sent SIGTERM to pid {pid}")
+            except Exception as e:
+                self.console.print(f"[red]Force stop failed:[/red] {e}")
         self._status = "STOPPED"
 
     # Simple command handlers
-    def _get_reporter(self) -> ReportGenerator:
-        cfg = self.context.get("config")
-        storage_path = cfg.monitor.storage_path if cfg and getattr(cfg, "monitor", None) else "~/.cryptobot/monitor.db"
-        storage = StorageManager(storage_path)
-        return ReportGenerator(storage)
-
     def _cmd_trades(self, args: List[str]) -> None:
         parser = argparse.ArgumentParser(prog="trades", add_help=False)
         parser.add_argument("--limit", type=int, default=10)

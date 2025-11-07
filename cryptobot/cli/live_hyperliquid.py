@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import time
 import argparse
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import os
+import threading
 
 from cryptobot.core.config import AppConfig
 from cryptobot.core.logging import get_logger, setup_logging
@@ -23,9 +24,10 @@ from cryptobot.broker.executor import MultiStrategyExecutor
 from cryptobot.monitor.performance import PerformanceTracker
 from cryptobot.monitor.engine import MonitorEngine
 from cryptobot.data.context_aggregator import MarketContextAggregator
+from cryptobot.monitor.storage import StorageManager
 
 
-def run_live(config_path: str) -> None:
+def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> None:
     load_local_environment()
     cfg = AppConfig.load(config_path)
     setup_logging(level="INFO")
@@ -33,6 +35,22 @@ def run_live(config_path: str) -> None:
 
     log.info("Starting Hyperliquid live runner...")
     mode_manager = ModeManager(cfg)
+
+    # Global runtime storage (singleton status)
+    storage_path = cfg.monitor.storage_path if getattr(cfg, "monitor", None) else "~/.cryptobot/monitor.db"
+    storage = StorageManager(storage_path)
+
+    # Enforce single active instance (recent heartbeat)
+    try:
+        rs = storage.get_runtime_status() or {}
+        last_hb = float(rs.get("last_heartbeat") or 0.0)
+        status = str(rs.get("status") or "STOPPED")
+        threshold = max(15, int(getattr(cfg.llm, "decision_interval_sec", 30)) * 3)
+        if status == "ACTIVE" and (time.time() - last_hb) < float(threshold):
+            log.warning("Another CryptoBot instance appears ACTIVE (recent heartbeat). Refusing to start.")
+            return
+    except Exception:
+        pass
 
     # Startup safety checks: require LLM and exchange keys
     if bool(getattr(cfg.llm, "enabled", True)):
@@ -51,6 +69,15 @@ def run_live(config_path: str) -> None:
         private_key=mode_manager.private_key,
         testnet=mode_manager.is_testnet(),
     )
+
+    # Record runtime start and clear any old stop requests
+    try:
+        pid = os.getpid()
+        actual_address = getattr(broker, "account_address", mode_manager.wallet_address)
+        storage.set_runtime_started(pid=pid, config_path=str(config_path), testnet=bool(mode_manager.is_testnet()), wallet_address=str(actual_address))
+        storage.clear_runtime_stop_request()
+    except Exception:
+        pass
 
     llm_client = LLMClient.from_env()
     orchestrator = LLMOrchestrator(llm_client)
@@ -192,8 +219,23 @@ def run_live(config_path: str) -> None:
         
         return max(0.0, min(1.0, score))
 
-    while True:
+    while not (stop_event and stop_event.is_set()):
         try:
+            # Honor remote stop requests (from shell/systemd)
+            try:
+                rs = storage.get_runtime_status() or {}
+                if bool(rs.get("desired_stop", False)):
+                    log.info("Stop requested remotely. Shutting down gracefully...")
+                    break
+            except Exception:
+                pass
+
+            # Record heartbeat early each loop
+            try:
+                storage.record_runtime_heartbeat(pid=pid)
+            except Exception:
+                pass
+
             # Vérifier budget mensuel (si configuré)
             if monthly_budget_usd > 0.0:
                 stats = llm_client._cost_tracker.get_stats()
@@ -291,12 +333,30 @@ def run_live(config_path: str) -> None:
             # 5. Update performance tracking
             performance_tracker.update_positions(broker.get_portfolio())
 
-            # 6. Sleep
-            time.sleep(int(cfg.llm.decision_interval_sec))
+            # 6. Sleep (short sleep chunks to react faster to stop_event), and heartbeat periodically
+            total_sleep = int(cfg.llm.decision_interval_sec)
+            slept = 0.0
+            while slept < total_sleep and not (stop_event and stop_event.is_set()):
+                # Keep heartbeat fresh without hammering the DB
+                if (slept % 2.0) < 1e-6:
+                    try:
+                        storage.record_runtime_heartbeat(pid=pid)
+                    except Exception:
+                        pass
+                time.sleep(0.5)
+                slept += 0.5
 
         except Exception as e:  # pragma: no cover - runtime path
             log.error(f"Error in main loop: {e}")
-            time.sleep(10)
+            # Sleep a bit but allow early exit on stop
+            for _ in range(20):
+                try:
+                    storage.record_runtime_heartbeat(pid=pid)
+                except Exception:
+                    pass
+                if stop_event and stop_event.is_set():
+                    break
+                time.sleep(0.5)
         finally:
             # loop continues
             pass
@@ -307,6 +367,10 @@ def run_live(config_path: str) -> None:
             monitor_engine.stop()
         except Exception:
             pass
+    try:
+        storage.set_runtime_stopped()
+    except Exception:
+        pass
 
 
 def main() -> None:

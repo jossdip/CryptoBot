@@ -25,4 +25,7 @@ class ReportGenerator:
     def ai_insights(self, *, limit: int = 5) -> List[Dict[str, Any]]:
         return self.storage.recent_llm_decisions(limit=limit)
 
+    def runtime_status(self) -> Optional[Dict[str, Any]]:
+        return self.storage.get_runtime_status()
+
 
