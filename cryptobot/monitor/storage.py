@@ -26,7 +26,9 @@ class StorageManager:
     """
 
     def __init__(self, db_path: str = "~/.cryptobot/monitor.db") -> None:
-        self.db_path = _expand(db_path)
+        # Allow overriding the monitor DB path via environment to share status across sessions
+        env_override = os.getenv("CRYPTOBOT_MONITOR_DB")
+        self.db_path = _expand(env_override or db_path)
         Path(os.path.dirname(self.db_path)).mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)

@@ -97,13 +97,17 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
         pf = broker.get_portfolio()
         if pf.get("ok"):
             resp = pf.get("response", {})
+            raw = pf.get("raw")
+            if raw is not None:
+                log.debug(f"Raw portfolio payload: {raw}")
             bal = None
             eq = None
             upnl = None
             try:
-                bal = float(resp.get("balance", resp.get("cash", 0.0)))
+                # Best-effort numeric extract
+                bal = float(resp.get("balance", 0.0))
                 eq = float(resp.get("equity", bal))
-                upnl = float(resp.get("unrealized_pnl", resp.get("unrealizedPnl", 0.0)))
+                upnl = float(resp.get("unrealized_pnl", 0.0))
             except Exception:
                 pass
             log.info(f"Portfolio: balance={bal if bal is not None else '?'} | equity={eq if eq is not None else '?'} | uPnL={upnl if upnl is not None else '?'}")

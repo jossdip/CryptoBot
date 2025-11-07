@@ -237,6 +237,12 @@ class InteractiveShell:
                 self.console.print(f"Portfolio: balance={bal:.2f} | equity={eq:.2f} | uPnL={upnl:.2f}")
             except Exception:
                 pass
+        # Show which monitor DB path is used (to debug multi-install issues)
+        try:
+            storage = self._get_storage()
+            self.console.print(f"Monitor DB: {storage.db_path}")
+        except Exception:
+            pass
 
     def _start_trading(self) -> None:
         # Prevent starting if a global active instance exists with a fresh heartbeat

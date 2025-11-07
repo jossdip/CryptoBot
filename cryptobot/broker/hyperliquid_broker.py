@@ -196,9 +196,9 @@ class HyperliquidBroker:
                 return None
 
         # Try common summary fields for equity / balance / unrealized PnL
-        equity = _dig_first_number(data, ("accountValue", "equity", "totalAccountValue", "marginBalance"))
-        balance = _dig_first_number(data, ("availableMargin", "availableBalance", "cash", "balance"))
-        unreal = _dig_first_number(data, ("unrealizedPnl", "totalUnrealizedPnl", "unrealized_pnl"))
+        equity = _dig_first_number(data, ("equity", "accountValue", "totalAccountValue", "marginBalance", "account_value"))
+        balance = _dig_first_number(data, ("cash", "availableMargin", "availableBalance", "balance", "withdrawable", "free"))
+        unreal = _dig_first_number(data, ("unrealizedPnl", "totalUnrealizedPnl", "unrealized_pnl", "upnl"))
 
         if equity is not None:
             out["equity"] = float(equity)
@@ -309,7 +309,8 @@ class HyperliquidBroker:
                     try:
                         raw = call()
                         normalized = self._normalize_user_state(raw)
-                        return {"ok": True, "response": normalized, "ts": time.time()}
+                        # Include raw payload for debugging/diagnostics
+                        return {"ok": True, "response": normalized, "raw": raw, "ts": time.time()}
                     except Exception as e:
                         last_err = e
                         continue

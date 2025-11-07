@@ -10,6 +10,9 @@ from loguru import logger as _logger
 def setup_logging(log_dir: str = "logs", level: str = "INFO") -> None:
     Path(log_dir).mkdir(parents=True, exist_ok=True)
 
+    # Allow env override for log level (e.g., DEBUG)
+    level = str(os.getenv("CRYPTOBOT_LOG_LEVEL", level)).upper()
+
     _logger.remove()
     # Optional console sink can be disabled for background threads in interactive shell
     disable_console = str(os.getenv("CRYPTOBOT_DISABLE_CONSOLE_LOG", "0")).lower() in {"1", "true", "yes"}

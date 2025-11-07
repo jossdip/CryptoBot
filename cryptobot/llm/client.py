@@ -7,6 +7,7 @@ from typing import Dict, Optional, Any
 from collections import defaultdict
 
 import httpx
+from loguru import logger as log
 
 
 # DeepSeek pricing (2024) - DeepSeek-V3 (Chat)
@@ -128,6 +129,13 @@ class LLMClient:
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"].strip()
+                if str(os.getenv("CRYPTOBOT_LLM_DEBUG", "0")).lower() in {"1", "true", "yes"}:
+                    log.debug({
+                        "llm_call": "score_risk",
+                        "prompt": prompt,
+                        "response": content,
+                        "usage": data.get("usage", {}),
+                    })
                 # Track cost
                 tokens_input = data.get("usage", {}).get("prompt_tokens", len(prompt.split()) * 1.3)
                 tokens_output = data.get("usage", {}).get("completion_tokens", 10)
@@ -169,6 +177,13 @@ class LLMClient:
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"].strip()
+                if str(os.getenv("CRYPTOBOT_LLM_DEBUG", "0")).lower() in {"1", "true", "yes"}:
+                    log.debug({
+                        "llm_call": "decide_futures",
+                        "prompt": prompt,
+                        "response": content,
+                        "usage": data.get("usage", {}),
+                    })
                 # Track cost
                 tokens_input = data.get("usage", {}).get("prompt_tokens", len(prompt.split()) * 1.3)
                 tokens_output = data.get("usage", {}).get("completion_tokens", 64)
@@ -251,6 +266,15 @@ class LLMClient:
                     resp.raise_for_status()
                     data = resp.json()
                     content = str(data["choices"][0]["message"]["content"]).strip()
+                    if str(os.getenv("CRYPTOBOT_LLM_DEBUG", "0")).lower() in {"1", "true", "yes"}:
+                        log.debug({
+                            "llm_call": "generic",
+                            "system": system_prompt,
+                            "json_mode": json_mode,
+                            "prompt": prompt,
+                            "response": content,
+                            "usage": data.get("usage", {}),
+                        })
                     # Track cost
                     tokens_input = data.get("usage", {}).get("prompt_tokens", len(prompt.split()) * 1.3)
                     tokens_output = data.get("usage", {}).get("completion_tokens", max_tokens * 0.3)
