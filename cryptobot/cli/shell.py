@@ -117,7 +117,8 @@ class InteractiveShell:
             cmd, *args = parts
             cmd = cmd.lower()
             if cmd in {"exit", "quit", "q"}:
-                self._stop_trading()
+                # Exit shell without stopping the bot
+                self.console.print("Closing shell (bot continues running).")
                 stop_animated_logo()
                 break
             if cmd in {"clear", "cls"}:
