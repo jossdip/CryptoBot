@@ -359,34 +359,82 @@ class InteractiveShell:
 
     def _stop_trading(self, args: Optional[List[str]] = None) -> None:
         # Signal the background loop to stop cooperatively (local + remote)
-        try:
-            storage = self._get_storage()
-            storage.request_runtime_stop()
-        except Exception:
-            pass
-        if self._running_thread and self._running_thread.is_alive():
-            self._stop_event.set()
-            self.console.print("Requesting local stop...")
-        # Optional --force to kill remote pid
+        allow_remote_stop = str(os.getenv("CRYPTOBOT_ALLOW_REMOTE_STOP", "0")).lower() in {"1", "true", "yes"}
+        service_name = os.getenv("CRYPTOBOT_SERVICE_NAME", "").strip()
+        # If a systemd service name is provided, prefer stopping the service
+        if service_name:
+            try:
+                res = subprocess.run(["systemctl", "stop", service_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                out = res.stdout.decode(errors="ignore").strip()
+                err = res.stderr.decode(errors="ignore").strip()
+                if out:
+                    self.console.print(out)
+                if err:
+                    self.console.print(f"[red]{err}[/red]")
+                if res.returncode == 0:
+                    self.console.print(f"Requested systemd stop for service '{service_name}'.")
+                    self._status = "STOPPED"
+                    return
+            except Exception:
+                # Fallback to local stop flow below
+                pass
         force = bool(args and any(a in {"--force", "-f"} for a in args))
-        if force:
+        sent_signal = False
+        # Prefer cooperative remote stop only when explicitly allowed and not forcing
+        if allow_remote_stop and not force:
+            try:
+                storage = self._get_storage()
+                storage.request_runtime_stop()
+                self.console.print("Requested remote cooperative stop.")
+            except Exception:
+                pass
+        else:
+            # Fallback to SIGTERM if remote stop is disabled or --force provided
             try:
                 rs = self._get_reporter().runtime_status() or {}
                 pid = int(rs.get("pid")) if rs.get("pid") is not None else None
                 if pid:
                     os.kill(pid, signal.SIGTERM)
-                    self.console.print(f"Sent SIGTERM to pid {pid}")
+                    sent_signal = True
+                    if allow_remote_stop:
+                        self.console.print(f"Sent SIGTERM to pid {pid}")
+                    else:
+                        self.console.print(f"Remote stop disabled; sent SIGTERM to pid {pid}")
             except Exception as e:
-                self.console.print(f"[red]Force stop failed:[/red] {e}")
+                self.console.print(f"[red]Force/Signal stop failed:[/red] {e}")
+        # Also stop local in-process thread if present
+        if self._running_thread and self._running_thread.is_alive():
+            self._stop_event.set()
+            if not sent_signal:
+                self.console.print("Requesting local stop...")
         self._status = "STOPPED"
 
     def _restart_trading(self, args: Optional[List[str]] = None) -> None:
         # Graceful stop first
-        self.console.print("Restarting bot: stopping...")
-        try:
-            self._stop_trading(args)
-        except Exception:
-            pass
+        service_name = os.getenv("CRYPTOBOT_SERVICE_NAME", "").strip()
+        if service_name:
+            # If systemd service configured, prefer systemd restart
+            try:
+                res = subprocess.run(["systemctl", "restart", service_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                out = res.stdout.decode(errors="ignore").strip()
+                err = res.stderr.decode(errors="ignore").strip()
+                if out:
+                    self.console.print(out)
+                if err:
+                    self.console.print(f"[red]{err}[/red]")
+                if res.returncode == 0:
+                    self.console.print(f"Requested systemd restart for service '{service_name}'.")
+                    # Post-start verification still applies below
+                else:
+                    self.console.print("[yellow]systemd restart failed; falling back to local restart.[/yellow]")
+            except Exception:
+                self.console.print("[yellow]systemd not available; falling back to local restart.[/yellow]")
+        else:
+            self.console.print("Restarting bot: stopping...")
+            try:
+                self._stop_trading(args)
+            except Exception:
+                pass
         # Short, non-blocking wait for stop (max ~5s), then force if needed
         cfg = self.context.get("config")
         decision_interval = int(getattr(getattr(cfg, "llm", None), "decision_interval_sec", 30)) if cfg else 30
@@ -444,21 +492,22 @@ class InteractiveShell:
             pass
         # If the bot was launched via deploy scripts, prefer delegating to them for a clean restart
         used_external = False
-        try:
-            repo_root = Path(__file__).resolve().parents[2]
-            script = repo_root / "deploy" / "restart_if_running.sh"
-            if script.exists() and os.access(str(script), os.X_OK):
-                res = subprocess.run(["bash", str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                out = res.stdout.decode(errors="ignore").strip()
-                err = res.stderr.decode(errors="ignore").strip()
-                if out:
-                    self.console.print(out)
-                if err:
-                    self.console.print(f"[red]{err}[/red]")
-                used_external = (res.returncode == 0)
-        except Exception:
-            used_external = False
-        if not used_external:
+        if not service_name:
+            try:
+                repo_root = Path(__file__).resolve().parents[2]
+                script = repo_root / "deploy" / "restart_if_running.sh"
+                if script.exists() and os.access(str(script), os.X_OK):
+                    res = subprocess.run(["bash", str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    out = res.stdout.decode(errors="ignore").strip()
+                    err = res.stderr.decode(errors="ignore").strip()
+                    if out:
+                        self.console.print(out)
+                    if err:
+                        self.console.print(f"[red]{err}[/red]")
+                    used_external = (res.returncode == 0)
+            except Exception:
+                used_external = False
+        if not service_name and not used_external:
             self.console.print("Restarting bot: starting...")
             self._start_trading()
         # Post-start verification: ensure it became ACTIVE shortly after

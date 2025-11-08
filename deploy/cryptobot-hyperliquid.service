@@ -7,10 +7,15 @@ Type=simple
 User=cryptobot
 WorkingDirectory=/opt/cryptobot
 Environment="PYTHONPATH=/opt/cryptobot"
+Environment="CRYPTOBOT_ALLOW_REMOTE_STOP=0"
+# Optional: pin monitor DB to a single path to avoid desync
+# Environment="CRYPTOBOT_MONITOR_DB=/opt/cryptobot/monitor.db"
 EnvironmentFile=/opt/cryptobot/.env
 ExecStart=/usr/bin/python3 -m cryptobot.cli.live_hyperliquid --config configs/live.hyperliquid.yaml
-Restart=always
-RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

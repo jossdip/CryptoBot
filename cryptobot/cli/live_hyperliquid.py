@@ -87,6 +87,8 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
     cfg = AppConfig.load(config_path)
     setup_logging(level="INFO")
     log = get_logger()
+    # Gate remote stop behavior behind an env flag to prevent unintended halts
+    allow_remote_stop = str(os.getenv("CRYPTOBOT_ALLOW_REMOTE_STOP", "0")).lower() in {"1", "true", "yes"}
 
     log.info("Starting Hyperliquid live runner...")
     # Global single-instance lock (system-wide)
@@ -357,9 +359,17 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
             try:
                 rs = storage.get_runtime_status() or {}
                 if bool(rs.get("desired_stop", False)):
-                    log.info("Stop requested remotely. Shutting down gracefully...")
-                    stop_requested = True
-                    break
+                    if allow_remote_stop:
+                        log.info("Stop requested remotely. Shutting down gracefully...")
+                        stop_requested = True
+                        break
+                    else:
+                        # Ignore and clear unintended remote stop requests
+                        log.warning("Remote stop requested but ignored (CRYPTOBOT_ALLOW_REMOTE_STOP disabled). Clearing flag.")
+                        try:
+                            storage.clear_runtime_stop_request()
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
