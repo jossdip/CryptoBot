@@ -87,6 +87,15 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
     cfg = AppConfig.load(config_path)
     setup_logging(level="INFO")
     log = get_logger()
+    # Disable Polymarket and Twitter sentiment sources for now (keep Reddit optional)
+    try:
+        if getattr(cfg, "sentiment", None):
+            if getattr(cfg.sentiment, "twitter", None):
+                cfg.sentiment.twitter.enabled = False
+            if getattr(cfg.sentiment, "polymarket", None):
+                cfg.sentiment.polymarket.enabled = False
+    except Exception:
+        pass
     # Gate remote stop behavior behind an env flag to prevent unintended halts
     allow_remote_stop = str(os.getenv("CRYPTOBOT_ALLOW_REMOTE_STOP", "0")).lower() in {"1", "true", "yes"}
 
@@ -497,7 +506,22 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                             opportunity=opportunity,
                             market_context=context,
                         )
-                        if decision.get("execute") and float(decision.get("confidence", 0.0)) > 0.7:
+                        # Safety: apply configurable confidence threshold (default 0.6) and clamp leverage conservatively
+                        min_conf = float(getattr(cfg.llm, "min_confidence_to_execute", 0.6))
+                        if decision.get("execute") and float(decision.get("confidence", 0.0)) >= min_conf:
+                            # Clamp leverage to config max (and stricter cap for market making)
+                            try:
+                                max_lev_cfg = int(getattr(getattr(cfg, "hyperliquid", object()), "max_leverage", 10))
+                            except Exception:
+                                max_lev_cfg = 10
+                            try:
+                                lev = int(decision.get("leverage", 1))
+                            except Exception:
+                                lev = 1
+                            # Market making: prefer very low leverage
+                            if strategy_name == "market_making":
+                                lev = min(lev, 3)
+                            decision["leverage"] = max(1, min(lev, max_lev_cfg))
                             decision["symbol"] = opportunity.get("symbol", symbols[0])
                             executor.execute_strategy(strategy_name, decision, weights)
                             performance_tracker.record_trade_start(
@@ -510,6 +534,20 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                                 log.info(f"Executed {strategy_name} on {decision['symbol']} | size_usd={float(decision.get('size_usd', 0.0)):.2f} | conf={float(decision.get('confidence', 0.0)):.2f}")
                             except Exception:
                                 pass
+                        else:
+                            # Fallback for market making: place passive maker orders in tight spreads, low risk
+                            if strategy_name == "market_making":
+                                try:
+                                    sym = opportunity.get("symbol", symbols[0])
+                                    mid = float(opportunity.get("mid", 0.0))
+                                    spr = float(opportunity.get("spread", 0.0))
+                                    vol = float(context.get("volatility", {}).get(sym, 0.01))
+                                    # Safe condition: valid mid and modest spread vs volatility
+                                    if mid > 0.0 and spr > 0.0 and vol > 0.0 and spr <= max(0.002, 3.0 * vol):
+                                        strategy_instance.place_maker_orders(symbol=sym, mid_price=mid, spread=spr)
+                                        log.info(f"Placed passive maker orders for {sym} | mid={mid:.2f} | spread={spr:.4f}")
+                                except Exception:
+                                    pass
 
             # 5. Update performance tracking
             performance_tracker.update_positions(broker.get_portfolio())

@@ -73,6 +73,7 @@ class LLMConfig(BaseModel):
     max_opportunities_per_cycle: int = 999  # Limite opportunités par cycle (filtre pour réduire coûts)
     min_opportunity_score: float = 0.0  # Score minimum avant appel LLM (0.0 = pas de filtre, 0.6+ = filtre actif)
     monthly_budget_usd: float = 0.0  # Budget mensuel max (0.0 = illimité)
+    min_confidence_to_execute: float = 0.6  # Seuil d'exécution des trades (par défaut 0.6)
 
 
 class StrategyWeightsConfig(BaseModel):

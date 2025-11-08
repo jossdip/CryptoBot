@@ -16,9 +16,7 @@ AVAILABLE TRADING STRATEGIES (HOW to trade):
 6. SNIPING: Catch new token listings early (high risk, high reward) - Very risky, limit exposure
 
 SIGNAL SOURCES (WHEN/WHETHER to trade - used by ALL strategies):
-- Reddit sentiment: Community sentiment (free, but can be noisy)
-- Twitter/X sentiment: Social media sentiment (free, but can be manipulated)
-- Polymarket: Prediction markets where people bet REAL MONEY (higher confidence, people put real money at stake)
+- Reddit sentiment: Community sentiment (secondary confirmation; use only if clearly available)
 - Market cap: Size and liquidity of the asset
 - Trading volume: Confirmation of moves
 - Funding rates: Trader sentiment on futures
@@ -65,8 +63,8 @@ ALLOCATION RULES (based on professional day trading best practices):
 - Sniping should have max 10% (very risky, limit exposure, #6 strategy)
 
 SIGNAL EVALUATION (for ALL strategies):
-- Polymarket signals: Higher confidence (people bet real money) → use for confidence scoring
-- Reddit/Twitter: Lower confidence (free, can be manipulated) → use as secondary confirmation
+- Priority signals: market cap/volume quality, funding rates, price action
+- Reddit: lower confidence, secondary confirmation only when clearly available
 - Market cap/volume: Use for quality assessment (larger assets = more liquid)
 - Funding rates: Use for trader sentiment confirmation
 
@@ -102,8 +100,8 @@ Risk tolerance (calculated):
 {risk_tolerance}
 
 SIGNAL EVALUATION (for confidence scoring):
-- Polymarket signals: Higher confidence (people bet real money) → weight heavily
-- Reddit/Twitter sentiment: Lower confidence (free, can be manipulated) → use as secondary
+- Primary: Market cap, trading volume, funding rates, and price action
+- Reddit sentiment: Lower confidence; use only as secondary if clearly available
 - Market cap: Higher = more liquid and stable
 - Trading volume: Higher = more confirmation
 - Funding rates: Shows trader sentiment
@@ -124,7 +122,7 @@ Decide if we should execute this trade. Output JSON:
 }}
 
 EXECUTION RULES:
-- Only execute if confidence > 0.7
+- Only execute if confidence >= 0.6
 - Use leverage conservatively: start low (3-5x), increase only with high confidence (8-10x max)
 - Always set stop-loss (max loss: 5% of allocated capital for this strategy)
 - For market making: lower leverage (1-3x), steady size
@@ -135,10 +133,9 @@ EXECUTION RULES:
 - For sniping: higher risk acceptable but limit size, leverage (3-5x max)
 
 SIGNAL PRIORITY (for confidence):
-1. Polymarket (highest confidence - real money bets)
-2. Market cap + volume (quality assessment)
-3. Funding rates (trader sentiment)
-4. Reddit/Twitter (secondary confirmation)
+1. Market cap + volume (quality assessment)
+2. Funding rates (trader sentiment)
+3. Reddit (secondary confirmation when available)
 """
 
 
