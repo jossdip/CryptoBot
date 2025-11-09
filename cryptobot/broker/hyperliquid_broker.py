@@ -145,7 +145,7 @@ class HyperliquidBroker:
         except Exception:
             hl_symbol = symbol
 
-        # SDK specific call placeholders (actual field names depend on SDK)
+        # SDK specific call placeholders (actual field names/signatures depend on SDK)
         try:
             # Best-effort: attempt multiple call signatures depending on SDK variant
             is_buy = side.lower() == "buy"
@@ -157,11 +157,22 @@ class HyperliquidBroker:
             except Exception:
                 pass
 
-            # 1) Preferred explicit signature
+            # 1) Preferred explicit signature using positional args (common in HL SDK)
             if order_type == "market" and hasattr(self.client, "market_open"):
-                response = self.client.market_open(coin=hl_symbol, is_buy=is_buy, sz=float(size))  # type: ignore[attr-defined]
-                log.debug(f"Hyperliquid market_open response: {response}")
-                return {"ok": True, "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(size), "type": "market"}, "response": response, "ts": time.time()}
+                try:
+                    # Try positional form: market_open(coin, is_buy, sz)
+                    response = self.client.market_open(hl_symbol, is_buy, float(size))  # type: ignore[misc]
+                    log.debug(f"Hyperliquid market_open(positional) response: {response}")
+                    return {"ok": True, "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(size), "type": "market"}, "response": response, "ts": time.time()}
+                except TypeError:
+                    # Fallback to keyword form if positional fails in this SDK
+                    try:
+                        response = self.client.market_open(coin=hl_symbol, is_buy=is_buy, sz=float(size))  # type: ignore[attr-defined]
+                        log.debug(f"Hyperliquid market_open(keyword) response: {response}")
+                        return {"ok": True, "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(size), "type": "market"}, "response": response, "ts": time.time()}
+                    except Exception:
+                        # Will fall through to generic paths
+                        pass
 
             # 2) Generic place_order with coin/is_buy/sz/(limit_px)
             payload_generic: Dict[str, Any] = {
@@ -180,7 +191,15 @@ class HyperliquidBroker:
                 log.debug(f"Hyperliquid place_order response: {response}")
                 return {"ok": True, "request": payload_generic, "response": response, "ts": time.time()}
             except TypeError:
-                # 3) Fallback to original payload names if SDK expects them
+                # 3) Alternative generic: method name 'order' with positional args is used in some variants
+                try:
+                    if hasattr(self.client, "order"):
+                        response = self.client.order(hl_symbol, is_buy, float(size))  # type: ignore[misc]
+                        log.debug(f"Hyperliquid order(positional) response: {response}")
+                        return {"ok": True, "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(size), "type": order_type}, "response": response, "ts": time.time()}
+                except Exception:
+                    pass
+                # 4) Final fallback to original payload names if SDK expects them
                 payload: Dict[str, Any] = {
                     "symbol": hl_symbol,
                     "side": side,
