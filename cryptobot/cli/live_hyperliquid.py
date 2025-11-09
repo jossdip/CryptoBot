@@ -119,18 +119,9 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
     storage_path = cfg.monitor.storage_path if getattr(cfg, "monitor", None) else "~/.cryptobot/monitor.db"
     storage = StorageManager(storage_path)
 
-    # Enforce single active instance (recent heartbeat)
-    try:
-        rs = storage.get_runtime_status() or {}
-        last_hb = float(rs.get("last_heartbeat") or 0.0)
-        status = str(rs.get("status") or "STOPPED")
-        threshold = max(15, int(getattr(cfg.llm, "decision_interval_sec", 30)) * 3)
-        if status == "ACTIVE" and (time.time() - last_hb) < float(threshold):
-            log.warning("Another CryptoBot instance appears ACTIVE (recent heartbeat). Refusing to start.")
-            # Return True so supervisor loop exits and does not retry
-            return True
-    except Exception:
-        pass
+    # Note: We rely on a system-wide file lock as the single source of truth.
+    # The heartbeat record is informative only and should never prevent startup
+    # once the lock is acquired (avoids CI/CD restart races). Proceed regardless.
 
     # Startup safety checks: require LLM and exchange keys
     if bool(getattr(cfg.llm, "enabled", True)):
