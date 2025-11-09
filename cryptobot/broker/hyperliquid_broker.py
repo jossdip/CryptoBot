@@ -197,8 +197,9 @@ class HyperliquidBroker:
                 if hasattr(self.client, "order"):
                     response = None
                     try:
-                        # Common signature: order(coin, is_buy, sz, limit_px)
-                        response = self.client.order(hl_symbol, is_buy, float(q_sz), limit_px)  # type: ignore[misc]
+                        # Preferred SDK signature: dict-shaped order type
+                        order_type_dict = {"limit": {"px": float(limit_px), "tif": "Gtc"}}
+                        response = self.client.order(hl_symbol, is_buy, float(q_sz), order_type_dict)  # type: ignore[misc]
                     except TypeError as e:
                         # Alternate signature requires order_type
                         if "order_type" in str(e):
@@ -209,7 +210,8 @@ class HyperliquidBroker:
                                 # Try keyword order_type
                                 response = self.client.order(hl_symbol, is_buy, float(q_sz), limit_px, order_type="limit")  # type: ignore[misc]
                         else:
-                            raise
+                            # Legacy signature: order(coin, is_buy, sz, limit_px)
+                            response = self.client.order(hl_symbol, is_buy, float(q_sz), limit_px)  # type: ignore[misc]
                     except Exception as e:
                         if "float_to_wire" in str(e) or "rounding" in str(e):
                             step = self._get_size_step(hl_symbol)
@@ -217,7 +219,9 @@ class HyperliquidBroker:
                             if new_q > 0.0:
                                 log.debug(f"Retrying limit order with adjusted size due to wire rounding: {q_sz} -> {new_q}")
                                 try:
-                                    response = self.client.order(hl_symbol, is_buy, float(new_q), limit_px)  # type: ignore[misc]
+                                    # Retry with dict-shaped order type first
+                                    order_type_dict = {"limit": {"px": float(limit_px), "tif": "Gtc"}}
+                                    response = self.client.order(hl_symbol, is_buy, float(new_q), order_type_dict)  # type: ignore[misc]
                                 except TypeError as e2:
                                     if "order_type" in str(e2):
                                         try:
@@ -225,23 +229,26 @@ class HyperliquidBroker:
                                         except TypeError:
                                             response = self.client.order(hl_symbol, is_buy, float(new_q), limit_px, order_type="limit")  # type: ignore[misc]
                                     else:
-                                        raise
+                                        # Last resort: legacy float limit price
+                                        response = self.client.order(hl_symbol, is_buy, float(new_q), limit_px)  # type: ignore[misc]
                                 q_sz = new_q
                             else:
                                 raise
                         elif "indices must be integers" in str(e):
                             # SDK variant expects a dict-shaped payload. Try several common shapes.
                             payload_candidates = [
-                                {"type": "limit", "coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz), "limit_px": float(limit_px)},
-                                {"coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz), "limit_px": float(limit_px), "order_type": "limit"},
-                                {"orderType": "limit", "coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz), "limitPx": float(limit_px)},
-                                # Stringified numbers to avoid internal float parsing issues
-                                {"type": "limit", "coin": hl_symbol, "is_buy": is_buy, "sz": f"{float(q_sz):.12f}", "limit_px": f"{float(limit_px):.8f}"},
+                                # Positional with dict order type
+                                ("positional", (hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px), "tif": "Gtc"}}), {}),
+                                # Same but with stringified numbers
+                                ("positional", (hl_symbol, is_buy, float(q_sz), {"limit": {"px": f"{float(limit_px):.8f}", "tif": "Gtc"}}), {}),
+                                # Single-dict payload variants observed in some SDKs
+                                ("single", ({"type": "limit", "coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz), "limit_px": float(limit_px)},), {}),
+                                ("single", ({"orderType": "limit", "coin": hl_symbol, "is_buy": is_buy, "sz": f"{float(q_sz):.12f}", "limitPx": f"{float(limit_px):.8f}"},), {}),
                             ]
                             last_err: Optional[Exception] = None
-                            for payload in payload_candidates:
+                            for call_kind, args, kwargs in payload_candidates:
                                 try:
-                                    response = self.client.order(payload)  # type: ignore[misc]
+                                    response = self.client.order(*args, **kwargs)  # type: ignore[misc]
                                     break
                                 except Exception as e3:
                                     last_err = e3
@@ -251,9 +258,14 @@ class HyperliquidBroker:
                                         new_q = max(0.0, float(Decimal(str(q_sz)) - Decimal(str(step))))
                                         if new_q > 0.0:
                                             try:
-                                                payload2 = dict(payload)
-                                                payload2["sz"] = float(new_q) if not isinstance(payload.get("sz"), str) else f"{float(new_q):.12f}"
-                                                response = self.client.order(payload2)  # type: ignore[misc]
+                                                if call_kind == "positional":
+                                                    args2 = list(args)
+                                                    args2[2] = float(new_q)
+                                                    response = self.client.order(*tuple(args2), **kwargs)  # type: ignore[misc]
+                                                else:
+                                                    payload2 = dict(args[0])
+                                                    payload2["sz"] = float(new_q) if not isinstance(payload2.get("sz"), str) else f"{float(new_q):.12f}"
+                                                    response = self.client.order(payload2)  # type: ignore[misc]
                                                 q_sz = new_q
                                                 break
                                             except Exception as e4:
@@ -279,8 +291,8 @@ class HyperliquidBroker:
                 q_sz = self._quantize_size(hl_symbol, float(size))
                 response = None
                 try:
-                    # Some SDKs: order(coin, is_buy, sz)
-                    response = self.client.order(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                    # Preferred: dict-shaped market order
+                    response = self.client.order(hl_symbol, is_buy, float(q_sz), {"market": {}})  # type: ignore[misc]
                 except TypeError as e:
                     if "order_type" in str(e):
                         # Try including order_type='market'
@@ -289,20 +301,20 @@ class HyperliquidBroker:
                         except TypeError:
                             response = self.client.order(hl_symbol, is_buy, float(q_sz), order_type="market")  # type: ignore[misc]
                     else:
-                        raise
+                        # Legacy: order(coin, is_buy, sz)
+                        response = self.client.order(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
                 except Exception as e:
                     if "indices must be integers" in str(e):
                         # Dict-shaped payload variant for market
                         payload_candidates = [
-                            {"type": "market", "coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz)},
-                            {"coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz), "order_type": "market"},
-                            {"orderType": "market", "coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz)},
-                            {"type": "market", "coin": hl_symbol, "is_buy": is_buy, "sz": f"{float(q_sz):.12f}"},
+                            ("positional", (hl_symbol, is_buy, float(q_sz), {"market": {}}), {}),
+                            ("single", ({"type": "market", "coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz)},), {}),
+                            ("single", ({"orderType": "market", "coin": hl_symbol, "is_buy": is_buy, "sz": f"{float(q_sz):.12f}"},), {}),
                         ]
                         last_err: Optional[Exception] = None
-                        for payload in payload_candidates:
+                        for call_kind, args, kwargs in payload_candidates:
                             try:
-                                response = self.client.order(payload)  # type: ignore[misc]
+                                response = self.client.order(*args, **kwargs)  # type: ignore[misc]
                                 break
                             except Exception as e3:
                                 last_err = e3
@@ -311,9 +323,14 @@ class HyperliquidBroker:
                                     new_q = max(0.0, float(Decimal(str(q_sz)) - Decimal(str(step))))
                                     if new_q > 0.0:
                                         try:
-                                            payload2 = dict(payload)
-                                            payload2["sz"] = float(new_q) if not isinstance(payload.get("sz"), str) else f"{float(new_q):.12f}"
-                                            response = self.client.order(payload2)  # type: ignore[misc]
+                                            if call_kind == "positional":
+                                                args2 = list(args)
+                                                args2[2] = float(new_q)
+                                                response = self.client.order(*tuple(args2), **kwargs)  # type: ignore[misc]
+                                            else:
+                                                payload2 = dict(args[0])
+                                                payload2["sz"] = float(new_q) if not isinstance(payload2.get("sz"), str) else f"{float(new_q):.12f}"
+                                                response = self.client.order(payload2)  # type: ignore[misc]
                                             q_sz = new_q
                                             break
                                         except Exception as e4:
