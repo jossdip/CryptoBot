@@ -499,7 +499,10 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                         )
                         # Safety: apply configurable confidence threshold (default 0.6) and clamp leverage conservatively
                         min_conf = float(getattr(cfg.llm, "min_confidence_to_execute", 0.6))
-                        if decision.get("execute") and float(decision.get("confidence", 0.0)) >= min_conf:
+                        conf = float(decision.get("confidence", 0.0))
+                        direction = str(decision.get("direction", "flat")).lower()
+                        size_usd = float(decision.get("size_usd", 0.0) or 0.0)
+                        if decision.get("execute") and conf >= min_conf and direction in {"long", "short"} and size_usd > 0.0:
                             # Clamp leverage to config max (and stricter cap for market making)
                             try:
                                 max_lev_cfg = int(getattr(getattr(cfg, "hyperliquid", object()), "max_leverage", 10))
@@ -518,11 +521,11 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                             performance_tracker.record_trade_start(
                                 strategy=strategy_name,
                                 entry_price=float(opportunity.get("price", 0.0) or opportunity.get("mid", 0.0) or 0.0),
-                                size=float(decision.get("size_usd", 0.0)),
+                                size=float(size_usd),
                                 symbol=decision["symbol"],
                             )
                             try:
-                                log.info(f"Executed {strategy_name} on {decision['symbol']} | size_usd={float(decision.get('size_usd', 0.0)):.2f} | conf={float(decision.get('confidence', 0.0)):.2f}")
+                                log.info(f"Executed {strategy_name} on {decision['symbol']} | size_usd={size_usd:.2f} | lev={int(decision.get('leverage', 1))} | dir={direction} | conf={conf:.2f}")
                             except Exception:
                                 pass
                         else:
@@ -537,6 +540,13 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                                     if mid > 0.0 and spr > 0.0 and vol > 0.0 and spr <= max(0.002, 3.0 * vol):
                                         strategy_instance.place_maker_orders(symbol=sym, mid_price=mid, spread=spr)
                                         log.info(f"Placed passive maker orders for {sym} | mid={mid:.2f} | spread={spr:.4f}")
+                                    else:
+                                        log.debug(f"Skipped passive maker orders | mid={mid:.2f} spr={spr:.5f} vol={vol:.5f} sym={sym}")
+                                except Exception:
+                                    pass
+                            else:
+                                try:
+                                    log.debug(f"Skip execution gate | exec={bool(decision.get('execute'))} conf={conf:.2f}/{min_conf:.2f} dir={direction} size_usd={size_usd:.2f} strat={strategy_name}")
                                 except Exception:
                                     pass
 

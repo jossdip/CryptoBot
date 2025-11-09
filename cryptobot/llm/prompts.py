@@ -123,6 +123,8 @@ Decide if we should execute this trade. Output JSON:
 
 EXECUTION RULES:
 - Only execute if confidence >= 0.6
+ - If "execute" is true, direction MUST be "long" or "short" (never "flat")
+ - If "execute" is true, size_usd MUST be > 0 (strictly positive)
 - Use leverage conservatively: start low (3-5x), increase only with high confidence (8-10x max)
 - Always set stop-loss (max loss: 5% of allocated capital for this strategy)
 - For market making: lower leverage (1-3x), steady size

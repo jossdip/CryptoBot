@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, Any
 
 from cryptobot.llm.orchestrator import StrategyWeight
+from loguru import logger as log
 
 
 class MultiStrategyExecutor:
@@ -29,9 +30,17 @@ class MultiStrategyExecutor:
         symbol = str(decision.get("symbol")) if "symbol" in decision else None
         direction = str(decision.get("direction", "flat"))
         if not symbol or direction == "flat":
+            try:
+                log.debug(f"Executor skip: missing symbol or flat direction | sym={symbol} dir={direction} alloc={allocated_capital:.2f}")
+            except Exception:
+                pass
             return
         size_usd = min(float(decision.get("size_usd", 0.0)), allocated_capital)
         if size_usd <= 0:
+            try:
+                log.debug(f"Executor skip: non-positive size | size_usd={float(decision.get('size_usd', 0.0)):.2f} alloc={allocated_capital:.2f}")
+            except Exception:
+                pass
             return
         leverage = int(decision.get("leverage", 1))
         stop_loss = decision.get("stop_loss_pct")
