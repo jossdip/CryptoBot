@@ -359,8 +359,7 @@ class InteractiveShell:
             self.console.print(f"[red]Failed to start bot:[/red] {e}")
 
     def _stop_trading(self, args: Optional[List[str]] = None) -> None:
-        # Signal the background loop to stop cooperatively (local + remote)
-        allow_remote_stop = str(os.getenv("CRYPTOBOT_ALLOW_REMOTE_STOP", "0")).lower() in {"1", "true", "yes"}
+        # Signal the background loop to stop cooperatively via monitor DB first
         service_name = os.getenv("CRYPTOBOT_SERVICE_NAME", "").strip()
         # If a systemd service name is provided, prefer stopping the service
         if service_name:
@@ -381,26 +380,22 @@ class InteractiveShell:
                 pass
         force = bool(args and any(a in {"--force", "-f"} for a in args))
         sent_signal = False
-        # Prefer cooperative remote stop only when explicitly allowed and not forcing
-        if allow_remote_stop and not force:
-            try:
-                storage = self._get_storage()
-                storage.request_runtime_stop()
-                self.console.print("Requested remote cooperative stop.")
-            except Exception:
-                pass
-        else:
-            # Fallback to SIGTERM if remote stop is disabled or --force provided
+        # Always attempt cooperative remote stop first (the live runner now honors it unconditionally)
+        try:
+            storage = self._get_storage()
+            storage.request_runtime_stop()
+            self.console.print("Requested remote cooperative stop.")
+        except Exception:
+            pass
+        # If --force provided, also send SIGTERM
+        if force:
             try:
                 rs = self._get_reporter().runtime_status() or {}
                 pid = int(rs.get("pid")) if rs.get("pid") is not None else None
                 if pid:
                     os.kill(pid, signal.SIGTERM)
                     sent_signal = True
-                    if allow_remote_stop:
-                        self.console.print(f"Sent SIGTERM to pid {pid}")
-                    else:
-                        self.console.print(f"Remote stop disabled; sent SIGTERM to pid {pid}")
+                    self.console.print(f"Sent SIGTERM to pid {pid}")
             except Exception as e:
                 self.console.print(f"[red]Force/Signal stop failed:[/red] {e}")
         # Also stop local in-process thread if present

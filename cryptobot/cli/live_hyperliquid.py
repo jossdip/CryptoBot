@@ -96,8 +96,9 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                 cfg.sentiment.polymarket.enabled = False
     except Exception:
         pass
-    # Gate remote stop behavior behind an env flag to prevent unintended halts
-    allow_remote_stop = str(os.getenv("CRYPTOBOT_ALLOW_REMOTE_STOP", "0")).lower() in {"1", "true", "yes"}
+    # Allow cooperative remote stop requests coming from the CLI/monitor DB
+    # Rationale: user controls stop via the interactive CLI; honor it unconditionally
+    allow_remote_stop = True
 
     log.info("Starting Hyperliquid live runner...")
     # Global single-instance lock (system-wide)
@@ -359,17 +360,10 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
             try:
                 rs = storage.get_runtime_status() or {}
                 if bool(rs.get("desired_stop", False)):
-                    if allow_remote_stop:
-                        log.info("Stop requested remotely. Shutting down gracefully...")
-                        stop_requested = True
-                        break
-                    else:
-                        # Ignore and clear unintended remote stop requests
-                        log.warning("Remote stop requested but ignored (CRYPTOBOT_ALLOW_REMOTE_STOP disabled). Clearing flag.")
-                        try:
-                            storage.clear_runtime_stop_request()
-                        except Exception:
-                            pass
+                    # Always honor a cooperative stop request recorded in storage
+                    log.info("Stop requested remotely. Shutting down gracefully...")
+                    stop_requested = True
+                    break
             except Exception:
                 pass
 
