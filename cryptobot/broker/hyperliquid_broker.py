@@ -157,70 +157,33 @@ class HyperliquidBroker:
             except Exception:
                 pass
 
-            # 1) Preferred explicit signature using positional args (common in HL SDK)
+            # 1) Preferred for market orders: use market_open with positional args and quantized size
             if order_type == "market" and hasattr(self.client, "market_open"):
-                try:
-                    # Try positional form: market_open(coin, is_buy, sz)
-                    response = self.client.market_open(hl_symbol, is_buy, float(size))  # type: ignore[misc]
-                    log.debug(f"Hyperliquid market_open(positional) response: {response}")
-                    return {"ok": True, "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(size), "type": "market"}, "response": response, "ts": time.time()}
-                except TypeError:
-                    # Fallback to keyword form if positional fails in this SDK
-                    try:
-                        response = self.client.market_open(coin=hl_symbol, is_buy=is_buy, sz=float(size))  # type: ignore[attr-defined]
-                        log.debug(f"Hyperliquid market_open(keyword) response: {response}")
-                        return {"ok": True, "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(size), "type": "market"}, "response": response, "ts": time.time()}
-                    except Exception:
-                        # Will fall through to generic paths
-                        pass
+                q_sz = self._quantize_size(hl_symbol, float(size))
+                response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                log.debug(f"Hyperliquid market_open(positional) response: {response}")
+                return {"ok": True, "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz), "type": "market"}, "response": response, "ts": time.time()}
 
-            # 2) Generic place_order with coin/is_buy/sz/(limit_px)
-            payload_generic: Dict[str, Any] = {
-                "coin": hl_symbol,
-                "is_buy": is_buy,
-                "sz": float(size),
-            }
+            # 2) Limit orders: attempt positional 'order(coin, is_buy, sz, limit_px)' if available; else market fallback
             if order_type == "limit":
                 if price is None:
                     raise ValueError("price is required for limit orders")
-                payload_generic["limit_px"] = float(price)
-                payload_generic["post_only"] = True
-            response: Dict[str, Any] = {}
-            try:
-                response = self.client.place_order(**payload_generic)  # type: ignore[arg-type]
-                log.debug(f"Hyperliquid place_order response: {response}")
-                return {"ok": True, "request": payload_generic, "response": response, "ts": time.time()}
-            except TypeError:
-                # 3) Alternative generic: method name 'order' with positional args is used in some variants
-                try:
-                    if hasattr(self.client, "order"):
-                        response = self.client.order(hl_symbol, is_buy, float(size))  # type: ignore[misc]
-                        log.debug(f"Hyperliquid order(positional) response: {response}")
-                        return {"ok": True, "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(size), "type": order_type}, "response": response, "ts": time.time()}
-                except Exception:
-                    pass
-                # 4) Final fallback to original payload names if SDK expects them
-                payload: Dict[str, Any] = {
-                    "symbol": hl_symbol,
-                    "side": side,
-                    "size": float(size),
-                    "type": order_type,
-                    "leverage": int(leverage),
-                }
-                if order_type == "limit":
-                    if price is None:
-                        raise ValueError("price is required for limit orders")
-                    payload["price"] = float(price)
-                if stop_loss is not None:
-                    payload["stop_loss"] = float(stop_loss)
-                if take_profit is not None:
-                    payload["take_profit"] = float(take_profit)
-                if client_id:
-                    payload["client_id"] = client_id
-
-                response = self.client.place_order(**payload)  # type: ignore[arg-type]
-                log.debug(f"Hyperliquid fallback place_order response: {response}")
-                return {"ok": True, "request": payload, "response": response, "ts": time.time()}
+                q_sz = self._quantize_size(hl_symbol, float(size))
+                limit_px = float(price)
+                if hasattr(self.client, "order"):
+                    response = self.client.order(hl_symbol, is_buy, float(q_sz), limit_px)  # type: ignore[misc]
+                    log.debug(f"Hyperliquid order(positional, limit) response: {response}")
+                    return {"ok": True, "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz), "limit_px": limit_px, "type": "limit"}, "response": response, "ts": time.time()}
+                # Fallback: place a market order if limit path not available
+                response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                log.debug(f"Hyperliquid market_open(as fallback for limit) response: {response}")
+                return {"ok": True, "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz), "type": "market"}, "response": response, "ts": time.time()}
+            # 3) Market orders without market_open: try generic 'order(coin, is_buy, sz)'
+            if hasattr(self.client, "order"):
+                q_sz = self._quantize_size(hl_symbol, float(size))
+                response = self.client.order(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                log.debug(f"Hyperliquid order(positional, market) response: {response}")
+                return {"ok": True, "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz), "type": "market"}, "response": response, "ts": time.time()}
         except Exception as e:  # pragma: no cover - SDK runtime path
             log.error(f"Failed to place order on Hyperliquid: {e}")
             return {"ok": False, "error": str(e), "ts": time.time()}
@@ -245,6 +208,90 @@ class HyperliquidBroker:
         base = base.replace(":USD", "")
         # Final cleanup: keep only alphanumerics (HL tickers are uppercase coin names)
         return "".join(ch for ch in base if ch.isalnum())
+
+    def _get_size_step(self, coin: str) -> float:
+        """
+        Best-effort retrieval of size step (minimum increment) for a coin.
+        Falls back to conservative defaults if SDK info is unavailable.
+        """
+        # Conservative defaults (may be overridden by Info metadata)
+        defaults = {
+            "BTC": 0.001,
+            "ETH": 0.01,
+        }
+        try:
+            if HyperliquidInfo is not None:
+                info_client = None
+                last_err: Optional[Exception] = None
+                for args, kwargs in (
+                    ((), {"base_url": self.conn.base_url}),
+                    ((self.conn.base_url,), {}),
+                    ((), {}),
+                ):
+                    try:
+                        info_client = HyperliquidInfo(*args, **kwargs)  # type: ignore[misc]
+                        break
+                    except Exception as e:
+                        last_err = e
+                        continue
+                if info_client is None:
+                    raise last_err or RuntimeError("Failed to construct Info client")
+                # Try common metadata endpoints
+                meta_obj = None
+                for getter in ("meta", "all_coins", "get_all_coins"):
+                    fn = getattr(info_client, getter, None)
+                    if callable(fn):
+                        try:
+                            meta_obj = fn()
+                            break
+                        except Exception:
+                            continue
+                # Try to extract szDecimals for the coin
+                if isinstance(meta_obj, dict):
+                    candidates = []
+                    for key in ("coins", "assets", "data"):
+                        if key in meta_obj:
+                            obj = meta_obj[key]
+                            if isinstance(obj, list):
+                                candidates = obj
+                                break
+                    if not candidates and "meta" in meta_obj and isinstance(meta_obj["meta"], list):
+                        candidates = meta_obj["meta"]
+                    for c in candidates:
+                        try:
+                            name = str(c.get("name") or c.get("coin") or c.get("symbol") or "").upper()
+                            if name == coin.upper():
+                                sz_dec = c.get("szDecimals") or c.get("sz_decimals") or c.get("sizeDecimals")
+                                if sz_dec is not None:
+                                    d = int(sz_dec)
+                                    step = 10.0 ** (-d)
+                                    if step > 0:
+                                        return float(step)
+                        except Exception:
+                            continue
+        except Exception:
+            pass
+        return float(defaults.get(coin.upper(), 0.001))
+
+    def _quantize_size(self, coin: str, size: float) -> float:
+        """
+        Quantize the size down to the allowed increment to avoid wire rounding errors.
+        """
+        try:
+            step = max(1e-12, float(self._get_size_step(coin)))
+            if size <= 0 or step <= 0:
+                return 0.0
+            # floor to increment
+            units = int(float(size) / step)
+            q = float(units) * step
+            if q <= 0.0 and size > 0.0:
+                q = step
+            # Guard against excessive float precision
+            # Round to nearest 12 decimals to keep wire clean
+            return float(f"{q:.12f}")
+        except Exception:
+            # Last resort: return original size with limited precision
+            return float(f"{float(size):.12f}")
 
     def _normalize_user_state(self, data: Any) -> Dict[str, Any]:
         """Best-effort normalization of Info.user_state payload into a common schema.
