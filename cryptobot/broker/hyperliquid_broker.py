@@ -252,7 +252,21 @@ class HyperliquidBroker:
             if HyperliquidInfo is not None:
                 info_client = None
                 last_err: Optional[Exception] = None
+                # Prefer constructing Info with explicit chain when available; some SDKs need it to read testnet state
+                chain_kw = {}
+                try:
+                    if _HLChain is not None:
+                        chain_kw = {"chain": (_HLChain.TESTNET if bool(self.conn.testnet) else _HLChain.MAINNET)}  # type: ignore[assignment]
+                except Exception:
+                    chain_kw = {}
                 for args, kwargs in (
+                    # With base_url + chain (preferred)
+                    ((), {"base_url": self.conn.base_url, **chain_kw}),
+                    # With positional base_url + chain
+                    ((self.conn.base_url,), {**chain_kw}),
+                    # Chain only (fallback)
+                    ((), {**chain_kw}),
+                    # Base_url only (legacy)
                     ((), {"base_url": self.conn.base_url}),
                     ((self.conn.base_url,), {}),
                     ((), {}),
@@ -394,7 +408,19 @@ class HyperliquidBroker:
                                 break
                             except Exception:
                                 pass
-                    positions[sym] = {"symbol": sym, "qty": float(qty_val), "avg_price": float(avg_px)}
+                    # Optional leverage extraction if present
+                    lev_val = None
+                    for lk in ("leverage", "lev", "x", "isolatedLeverage"):
+                        if lk in p:
+                            try:
+                                lev_val = float(p[lk])
+                                break
+                            except Exception:
+                                pass
+                    pos_obj = {"symbol": sym, "qty": float(qty_val), "avg_price": float(avg_px)}
+                    if lev_val is not None:
+                        pos_obj["leverage"] = float(lev_val)
+                    positions[sym] = pos_obj
             elif isinstance(pos_container, dict):
                 for sym, p in pos_container.items():
                     try:
@@ -412,7 +438,19 @@ class HyperliquidBroker:
                         else:
                             avg_px = 0.0
                         if qty_val is not None:
-                            positions[str(sym)] = {"symbol": str(sym), "qty": float(qty_val), "avg_price": float(avg_px)}
+                            lev_val = None
+                            if isinstance(p, dict):
+                                for lk in ("leverage", "lev", "x", "isolatedLeverage"):
+                                    if lk in p:
+                                        try:
+                                            lev_val = float(p[lk])
+                                            break
+                                        except Exception:
+                                            pass
+                            pos_obj = {"symbol": str(sym), "qty": float(qty_val), "avg_price": float(avg_px)}
+                            if lev_val is not None:
+                                pos_obj["leverage"] = float(lev_val)
+                            positions[str(sym)] = pos_obj
                     except Exception:
                         continue
             out["positions"] = positions
@@ -431,7 +469,7 @@ class HyperliquidBroker:
             if callable(candidate):
                 try:
                     response: Dict[str, Any] = candidate()  # type: ignore[assignment]
-                    return {"ok": True, "response": response, "ts": time.time()}
+                    return {"ok": True, "response": response, "ts": time.time(), "query_address_used": self.query_address}
                 except Exception as e:
                     log.debug(f"Exchange.get_portfolio call failed: {e}")
         except Exception as e:
@@ -455,21 +493,42 @@ class HyperliquidBroker:
                         continue
                 if info_client is None:
                     raise last_err or RuntimeError("Failed to construct Info client")
-                # Call user_state using the derived address (source of truth)
-                query_addr = self.query_address
-                for call in (
-                    lambda: info_client.user_state(query_addr),  # type: ignore[attr-defined]
-                    lambda: info_client.user_state(address=query_addr),  # type: ignore[attr-defined]
-                ):
-                    try:
-                        raw = call()
-                        normalized = self._normalize_user_state(raw)
-                        # Include raw payload for debugging/diagnostics
-                        return {"ok": True, "response": normalized, "raw": raw, "ts": time.time()}
-                    except Exception as e:
-                        last_err = e
-                        continue
-                raise last_err or RuntimeError("user_state unavailable")
+                # Call user_state; prefer signer address but fall back to provided wallet if equity is zero
+                addresses_to_try: list[str] = []
+                signer_addr = self.account_address
+                if signer_addr:
+                    addresses_to_try.append(signer_addr)
+                if self.conn.wallet_address and self.conn.wallet_address not in addresses_to_try:
+                    addresses_to_try.append(self.conn.wallet_address)
+                best_payload: Optional[Dict[str, Any]] = None
+                best_raw: Optional[Dict[str, Any]] = None
+                best_addr_used: Optional[str] = None
+                best_equity = -1.0
+                for addr in addresses_to_try:
+                    for call in (
+                        lambda a=addr: info_client.user_state(a),  # type: ignore[attr-defined]
+                        lambda a=addr: info_client.user_state(address=a),  # type: ignore[attr-defined]
+                    ):
+                        try:
+                            raw = call()
+                            normalized = self._normalize_user_state(raw)
+                            equity = float(normalized.get("equity", 0.0))
+                            if equity > best_equity:
+                                best_equity = equity
+                                best_payload = normalized
+                                best_raw = raw
+                                best_addr_used = addr
+                            # Short-circuit if clearly non-zero equity
+                            if equity > 0.0:
+                                break
+                        except Exception as e:
+                            last_err = e
+                            continue
+                    if best_equity > 0.0:
+                        break
+                if best_payload is not None:
+                    return {"ok": True, "response": best_payload, "raw": best_raw, "ts": time.time(), "query_address_used": best_addr_used}
+                raise last_err or RuntimeError("user_state unavailable or empty")
         except Exception as e:
             log.error(f"Failed to fetch portfolio from Hyperliquid: {e}")
             return {"ok": False, "error": str(e), "ts": time.time()}

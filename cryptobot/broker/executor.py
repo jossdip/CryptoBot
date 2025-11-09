@@ -75,13 +75,27 @@ class MultiStrategyExecutor:
             log.info(f"Placing order | strat={strategy_name} sym={symbol} side={side} coin_sz={q_coin_size:.6f} lev={leverage} usd_sz={size_usd:.2f} entry={entry_price:.2f}")
         except Exception:
             pass
+        # Prefer passive limit orders for market_making to avoid taker fees
+        order_type = "market"
+        price = None
+        if strategy_name == "market_making" and entry_price > 0.0:
+            try:
+                spread = float(decision.get("spread", 0.0) or 0.0)
+            except Exception:
+                spread = 0.0
+            if spread and spread > 0.0:
+                # Place limit inside the spread (post-only would be ideal, but not all SDKs expose it)
+                px = entry_price * (1.0 - spread / 2.0) if side == "buy" else entry_price * (1.0 + spread / 2.0)
+                if px > 0.0:
+                    order_type = "limit"
+                    price = float(px)
         resp = self.broker.place_order(
             symbol=symbol,
             side=side,
             size=q_coin_size,
             leverage=leverage,
-            order_type="market",
-            price=None,
+            order_type=order_type,
+            price=price,
             stop_loss=stop_loss,
             take_profit=take_profit,
         )

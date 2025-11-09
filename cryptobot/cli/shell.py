@@ -29,7 +29,7 @@ from cryptobot.cli.commands.config import ConfigCommand
 from cryptobot.cli.commands.base import Command
 from cryptobot.monitor.storage import StorageManager
 from cryptobot.monitor.reporter import ReportGenerator
-from cryptobot.monitor.display import render_trades, render_portfolio
+from cryptobot.monitor.display import render_trades, render_portfolio, render_positions, render_trades_with_status
 from pathlib import Path
 from typing import List
 
@@ -70,7 +70,7 @@ class InteractiveShell:
         exchange = getattr(getattr(cfg, "general", None), "exchange_id", "hyperliquid") if cfg else "hyperliquid"
         completer = WordCompleter([
             "start", "stop", "restart", "pause", "resume", "status", "ps", "pids", "enforce", "killdups", "monitor",
-            "trades", "performance", "portfolio", "strategies", "weights",
+            "trades", "positions", "performance", "portfolio", "strategies", "weights",
             "risk", "config", "logs", "help", "exit", "quit", "clear", "version",
         ], ignore_case=True)
 
@@ -197,7 +197,7 @@ class InteractiveShell:
 
     def _print_help(self) -> None:
         self.console.print(
-            "Commands: start, stop [--force], restart [--force], pause, resume, status, monitor, trades, performance, portfolio, strategies, weights, risk, config, logs, help, exit, clear, version"
+            "Commands: start, stop [--force], restart [--force], pause, resume, status, monitor, trades, positions, performance, portfolio, strategies, weights, risk, config, logs, help, exit, clear, version"
         )
 
     def _trading_target(self) -> None:
@@ -532,11 +532,21 @@ class InteractiveShell:
         except SystemExit:
             return
         rep = self._get_reporter()
-        render_trades(rep.recent_trades(limit=int(opts.limit), strategy=opts.strategy))
+        # Enrich with latest positions to infer OPEN/CLOSED and show better status
+        trades = rep.recent_trades(limit=int(opts.limit), strategy=opts.strategy)
+        summary = rep.portfolio_summary()
+        render_trades_with_status(trades, summary)
 
     def _cmd_portfolio(self) -> None:
         rep = self._get_reporter()
-        render_portfolio(rep.portfolio_summary())
+        summary = rep.portfolio_summary()
+        render_portfolio(summary)
+        # Also show open positions
+        render_positions(summary)
+
+    def _cmd_positions(self) -> None:
+        rep = self._get_reporter()
+        render_positions(rep.portfolio_summary())
 
     def _cmd_performance(self, args: List[str]) -> None:
         # Coarse performance summary from trades

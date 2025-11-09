@@ -167,6 +167,7 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
         if pf.get("ok"):
             resp = pf.get("response", {})
             raw = pf.get("raw")
+            addr_used = pf.get("query_address_used", getattr(broker, "query_address", None))
             if raw is not None:
                 log.debug(f"Raw portfolio payload: {raw}")
             bal = None
@@ -180,6 +181,11 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
             except Exception:
                 pass
             log.info(f"Portfolio: balance={bal if bal is not None else '?'} | equity={eq if eq is not None else '?'} | uPnL={upnl if upnl is not None else '?'}")
+            try:
+                if addr_used:
+                    log.info(f"Portfolio query address used: {addr_used}")
+            except Exception:
+                pass
         else:
             log.warning(f"Portfolio snapshot unavailable: {pf.get('error')}")
     except Exception:
@@ -609,6 +615,11 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                                 decision["entry_price"] = float(opportunity.get("price", 0.0) or opportunity.get("mid", 0.0) or 0.0)
                             except Exception:
                                 decision["entry_price"] = 0.0
+                            # Also carry spread for maker pricing (used to avoid taker fees)
+                            try:
+                                decision["spread"] = float(opportunity.get("spread", 0.0))
+                            except Exception:
+                                decision["spread"] = 0.0
                             # Fallback: derive entry from context median if missing
                             if not decision["entry_price"] or decision["entry_price"] <= 0.0:
                                 try:
