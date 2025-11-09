@@ -192,7 +192,8 @@ class HyperliquidBroker:
                 if price is None:
                     raise ValueError("price is required for limit orders")
                 q_sz = self._quantize_size(hl_symbol, float(size))
-                limit_px = float(price)
+                # Quantize price to the allowed tick size to avoid wire rounding
+                limit_px = float(self._quantize_price(hl_symbol, "buy" if is_buy else "sell", float(price)))
                 if hasattr(self.client, "order"):
                     response = None
                     try:
@@ -232,7 +233,7 @@ class HyperliquidBroker:
                             raise
                     if response is not None:
                         log.debug(f"Hyperliquid order(positional, limit) response: {response}")
-                    return {"ok": True, "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz), "limit_px": limit_px, "type": "limit"}, "response": response, "ts": time.time()}
+                    return {"ok": True, "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz), "limit_px": float(limit_px), "type": "limit"}, "response": response, "ts": time.time()}
                 # Fallback: place a market order if limit path not available
                 response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
                 log.debug(f"Hyperliquid market_open(as fallback for limit) response: {response}")
@@ -379,6 +380,107 @@ class HyperliquidBroker:
                 return float(Decimal(str(size)).quantize(Decimal("1e-12"), rounding=ROUND_DOWN))
             except Exception:
                 return float(f"{float(size):.12f}")
+
+    def _get_price_tick(self, coin: str) -> float:
+        """
+        Retrieve the minimum price tick for a coin using Info metadata.
+        Falls back to conservative defaults if unavailable.
+        """
+        defaults = {
+            "BTC": 0.5,
+            "ETH": 0.05,
+        }
+        try:
+            if HyperliquidInfo is not None:
+                info_client = None
+                last_err: Optional[Exception] = None
+                chain_kw = {}
+                try:
+                    if _HLChain is not None:
+                        chain_kw = {"chain": (_HLChain.TESTNET if bool(self.conn.testnet) else _HLChain.MAINNET)}  # type: ignore[assignment]
+                except Exception:
+                    chain_kw = {}
+                for args, kwargs in (
+                    ((), {"base_url": self.conn.base_url, **chain_kw}),
+                    ((self.conn.base_url,), {**chain_kw}),
+                    ((), {**chain_kw}),
+                    ((), {"base_url": self.conn.base_url}),
+                    ((self.conn.base_url,), {}),
+                    ((), {}),
+                ):
+                    try:
+                        info_client = HyperliquidInfo(*args, **kwargs)  # type: ignore[misc]
+                        break
+                    except Exception as e:
+                        last_err = e
+                        continue
+                if info_client is None:
+                    raise last_err or RuntimeError("Failed to construct Info client")
+                meta_obj = None
+                for getter in ("meta", "all_coins", "get_all_coins"):
+                    fn = getattr(info_client, getter, None)
+                    if callable(fn):
+                        try:
+                            meta_obj = fn()
+                            break
+                        except Exception:
+                            continue
+                if isinstance(meta_obj, dict):
+                    candidates = []
+                    for key in ("coins", "assets", "data"):
+                        if key in meta_obj:
+                            obj = meta_obj[key]
+                            if isinstance(obj, list):
+                                candidates = obj
+                                break
+                    if not candidates and "meta" in meta_obj and isinstance(meta_obj["meta"], list):
+                        candidates = meta_obj["meta"]
+                    for c in candidates:
+                        try:
+                            name = str(c.get("name") or c.get("coin") or c.get("symbol") or "").upper()
+                            if name == coin.upper():
+                                px_dec = c.get("pxDecimals") or c.get("px_decimals") or c.get("priceDecimals")
+                                if px_dec is not None:
+                                    d = int(px_dec)
+                                    step = 10.0 ** (-d)
+                                    if step > 0:
+                                        return float(step)
+                        except Exception:
+                            continue
+        except Exception:
+            pass
+        return float(defaults.get(coin.upper(), 0.01))
+
+    def _quantize_price(self, coin: str, side: Literal["buy", "sell"], price: float) -> float:
+        """
+        Quantize a price to the allowed tick size. For buys, round down; for sells, round up.
+        This helps keep maker orders passive inside the spread without triggering wire rounding.
+        """
+        try:
+            tick = max(Decimal("1e-12"), Decimal(str(self._get_price_tick(coin))))
+            if float(price) <= 0 or tick <= 0:
+                return 0.0
+            getcontext().prec = max(getcontext().prec, 28)
+            px = Decimal(str(price))
+            # Compute the multiple of ticks
+            ticks = (px / tick)
+            if side.lower() == "buy":
+                # floor to nearest tick
+                ticks_q = ticks.to_integral_value(rounding=ROUND_DOWN)
+            else:
+                # ceil to nearest tick
+                # Ceil(x) = -floor(-x)
+                ticks_q = (-ticks).to_integral_value(rounding=ROUND_DOWN) * Decimal("-1")
+            q_px = ticks_q * tick
+            if q_px <= 0:
+                q_px = tick
+            # Limit to 8 decimals on wire
+            return float(Decimal(q_px).quantize(Decimal("1e-8"), rounding=ROUND_DOWN))
+        except Exception:
+            try:
+                return float(Decimal(str(price)).quantize(Decimal("1e-8"), rounding=ROUND_DOWN))
+            except Exception:
+                return float(f"{float(price):.8f}")
 
     def _normalize_user_state(self, data: Any) -> Dict[str, Any]:
         """Best-effort normalization of Info.user_state payload into a common schema.
