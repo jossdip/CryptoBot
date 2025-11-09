@@ -522,6 +522,22 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                                 decision["entry_price"] = float(opportunity.get("price", 0.0) or opportunity.get("mid", 0.0) or 0.0)
                             except Exception:
                                 decision["entry_price"] = 0.0
+                            # Fallback: derive entry from context median if missing
+                            if not decision["entry_price"] or decision["entry_price"] <= 0.0:
+                                try:
+                                    sym = decision["symbol"]
+                                    px_map = context.get("prices", {}).get(sym, {})
+                                    vals = [float(v) for v in (px_map.values() if isinstance(px_map, dict) else []) if float(v) > 0]
+                                    if vals:
+                                        import statistics
+                                        decision["entry_price"] = float(statistics.median(vals))
+                                except Exception:
+                                    pass
+                            # Debug gate values
+                            try:
+                                log.debug(f"Decision gate | strat={strategy_name} exec={bool(decision.get('execute'))} conf={conf:.2f}/{min_conf:.2f} dir={direction} size_usd={size_usd:.2f} entry={float(decision.get('entry_price',0.0)):.2f}")
+                            except Exception:
+                                pass
                             # Log attempt before execution
                             try:
                                 log.info(f"Attempting execution | strat={strategy_name} sym={decision['symbol']} dir={direction} size_usd={size_usd:.2f} lev={int(decision.get('leverage',1))} conf={conf:.2f}")
