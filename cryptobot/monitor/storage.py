@@ -124,6 +124,13 @@ class StorageManager:
                 );
                 """
             )
+            # Online migration: ensure newly added columns exist in older DBs
+            try:
+                cols = [row[1] for row in self._conn.execute("PRAGMA table_info(runtime_status)").fetchall()]
+                if "desired_flatten" not in cols:
+                    self._conn.execute("ALTER TABLE runtime_status ADD COLUMN desired_flatten INTEGER DEFAULT 0")
+            except Exception:
+                pass
             # Ensure a singleton row exists
             self._conn.execute(
                 """
