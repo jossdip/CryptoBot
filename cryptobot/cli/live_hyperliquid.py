@@ -104,9 +104,14 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
     # Global single-instance lock (system-wide)
     lock_handle = _acquire_single_instance_lock()
     if lock_handle is None:
-        log.warning("Another CryptoBot instance is already running (global lock held). Refusing to start.")
-        # Return True so the supervisor loop does NOT retry
-        return True
+        log.warning("Another CryptoBot instance is already running (global lock held). Waiting for release and will retry...")
+        # Brief wait so the incumbent can release its lock, then signal supervisor to retry
+        try:
+            time.sleep(2.0)
+        except Exception:
+            pass
+        # Return False so the supervisor loop retries (auto-restart path)
+        return False
     try:
         log.info(f"Config: {config_path}")
         env_path = os.getenv("CRYPTOBOT_ENV_PATH")
