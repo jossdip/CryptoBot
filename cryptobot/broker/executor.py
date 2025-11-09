@@ -114,4 +114,50 @@ class MultiStrategyExecutor:
             pass
         return resp
 
+    def close_position(
+        self,
+        *,
+        symbol: str,
+        qty: float,
+        order_type: str = "market",
+        limit_price: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Close an existing position by placing the opposing order for the given qty.
+        qty: positive absolute coin size to close
+        """
+        try:
+            coin = str(symbol).split("/", 1)[0].split(":", 1)[0]
+        except Exception:
+            coin = symbol
+        side = "sell" if float(qty) > 0 else "buy"
+        abs_qty = abs(float(qty))
+        # Quantize per broker rules
+        q_qty = abs_qty
+        try:
+            norm_fn = getattr(self.broker, "_normalize_symbol_for_hyperliquid", None)
+            q_fn = getattr(self.broker, "_quantize_size", None)
+            coin_tkr = norm_fn(symbol) if callable(norm_fn) else coin
+            if callable(q_fn) and coin_tkr:
+                q_qty = float(q_fn(coin_tkr, abs_qty))
+                if q_qty <= 0.0 and abs_qty > 0.0:
+                    q_qty = abs_qty
+        except Exception:
+            q_qty = abs_qty
+        try:
+            log.info(f"Closing position | sym={symbol} side={side} coin_sz={q_qty:.6f} type={order_type} limit={limit_price if limit_price else '-'}")
+        except Exception:
+            pass
+        resp = self.broker.place_order(
+            symbol=symbol,
+            side=side,
+            size=q_qty,
+            leverage=1,
+            order_type="limit" if str(order_type).lower() == "limit" else "market",
+            price=float(limit_price) if (order_type == "limit" and limit_price) else None,
+            stop_loss=None,
+            take_profit=None,
+        )
+        return resp
+
 

@@ -117,6 +117,7 @@ class StorageManager:
                     started_at REAL,
                     last_heartbeat REAL,
                     desired_stop INTEGER DEFAULT 0,
+                    desired_flatten INTEGER DEFAULT 0,
                     config_path TEXT,
                     testnet INTEGER,
                     wallet_address TEXT
@@ -126,8 +127,8 @@ class StorageManager:
             # Ensure a singleton row exists
             self._conn.execute(
                 """
-                INSERT OR IGNORE INTO runtime_status (id, status, desired_stop)
-                VALUES (1, 'STOPPED', 0)
+                INSERT OR IGNORE INTO runtime_status (id, status, desired_stop, desired_flatten)
+                VALUES (1, 'STOPPED', 0, 0)
                 """
             )
 
@@ -377,14 +378,15 @@ class StorageManager:
         with self._lock, self._conn:
             self._conn.execute(
                 """
-                INSERT INTO runtime_status (id, pid, status, started_at, last_heartbeat, desired_stop, config_path, testnet, wallet_address)
-                VALUES (1, ?, 'ACTIVE', ?, ?, 0, ?, ?, ?)
+                INSERT INTO runtime_status (id, pid, status, started_at, last_heartbeat, desired_stop, desired_flatten, config_path, testnet, wallet_address)
+                VALUES (1, ?, 'ACTIVE', ?, ?, 0, 0, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     pid=excluded.pid,
                     status='ACTIVE',
                     started_at=excluded.started_at,
                     last_heartbeat=excluded.last_heartbeat,
                     desired_stop=0,
+                    desired_flatten=0,
                     config_path=excluded.config_path,
                     testnet=excluded.testnet,
                     wallet_address=excluded.wallet_address
@@ -418,7 +420,7 @@ class StorageManager:
 
     def get_runtime_status(self) -> Optional[Dict[str, Any]]:
         row = self._conn.execute(
-            "SELECT pid, status, started_at, last_heartbeat, desired_stop, config_path, testnet, wallet_address FROM runtime_status WHERE id=1"
+            "SELECT pid, status, started_at, last_heartbeat, desired_stop, desired_flatten, config_path, testnet, wallet_address FROM runtime_status WHERE id=1"
         ).fetchone()
         if not row:
             return None
@@ -428,9 +430,10 @@ class StorageManager:
             "started_at": float(row[2]) if row[2] is not None else None,
             "last_heartbeat": float(row[3]) if row[3] is not None else None,
             "desired_stop": bool(row[4]) if row[4] is not None else False,
-            "config_path": str(row[5]) if row[5] is not None else None,
-            "testnet": bool(row[6]) if row[6] is not None else None,
-            "wallet_address": str(row[7]) if row[7] is not None else None,
+            "desired_flatten": bool(row[5]) if row[5] is not None else False,
+            "config_path": str(row[6]) if row[6] is not None else None,
+            "testnet": bool(row[7]) if row[7] is not None else None,
+            "wallet_address": str(row[8]) if row[8] is not None else None,
         }
 
     def request_runtime_stop(self) -> None:
@@ -440,6 +443,14 @@ class StorageManager:
     def clear_runtime_stop_request(self) -> None:
         with self._lock, self._conn:
             self._conn.execute("UPDATE runtime_status SET desired_stop=0 WHERE id=1")
+
+    def request_flatten_positions(self) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE runtime_status SET desired_flatten=1 WHERE id=1")
+
+    def clear_flatten_request(self) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE runtime_status SET desired_flatten=0 WHERE id=1")
 
     def close(self) -> None:
         with self._lock:

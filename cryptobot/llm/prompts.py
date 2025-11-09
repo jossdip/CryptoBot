@@ -141,3 +141,48 @@ SIGNAL PRIORITY (for confidence):
 """
 
 
+POSITION_PROMPT_TEMPLATE = """
+You are managing an OPEN POSITION on Hyperliquid with the sole goal to maximize realized PnL.
+
+Current open position:
+{position}
+
+Market context (includes all signals):
+{market_context}
+
+Portfolio state:
+{portfolio_state}
+
+Risk tolerance (calculated):
+{risk_tolerance}
+
+GUIDELINES (best practices for exit):
+- Favor taking profits when momentum stalls or reverses and risk-reward deteriorates
+- Cut losers early when thesis invalidates (trend breaks, adverse momentum, funding flips against you)
+- Consider liquidity (orderbook depth), volatility, funding, and current unrealized PnL
+- If confident exit edge exists, prefer MARKET for certainty; else LIMIT near mid with reasonable offset
+- Never output partial close below 10% of position unless strong reason
+
+OUTPUT strict JSON:
+{{
+  "close": true/false,
+  "size_pct": 0.0-1.0,           // fraction of the current position to close (1.0 = full close)
+  "order_type": "market"/"limit",
+  "limit_offset_pct": 0.0,       // if order_type=limit, place at mid*(1±offset) (sign by side)
+  "confidence": 0.0-1.0,
+  "reasoning": "Brief rationale using signals (1-2 lines)",
+  "set_bracket": true/false,     // if not closing now, set proactive TP/SL to protect PnL
+  "tp_pct": 0.0-0.1,             // take profit as fraction of entry (e.g., 0.008 = 0.8%)
+  "sl_pct": 0.0-0.1,             // stop loss as fraction of entry (e.g., 0.005 = 0.5%)
+  "trailing_pct": 0.0-0.1        // optional trailing stop fraction (0 to disable)
+}}
+
+EXECUTION RULES:
+- Only close if confidence >= 0.6
+- size_pct ∈ [0.1, 1.0] when close=true; clamp below/above if needed
+- If order_type='limit' and offset is missing, use 0.0005 (5 bps); bound 0.0001..0.005
+BRACKET RULES:
+- Only set_bracket=true if not closing now and confidence >= 0.6
+- tp_pct in [0.002, 0.02]; sl_pct in [0.003, 0.02]; trailing_pct in [0.0, 0.02]
+"""
+

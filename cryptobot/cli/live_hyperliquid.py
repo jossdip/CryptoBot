@@ -390,6 +390,9 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
         return max(0.0, min(1.0, score))
 
     stop_requested = False
+    # Active local brackets: symbol -> dict(tp_pct, sl_pct, trailing_pct, entry_price, direction)
+    active_brackets: Dict[str, Dict[str, float]] = {}
+    last_bracket_check_ts = 0.0
     while not (stop_event and stop_event.is_set()):
         try:
             # Honor remote stop requests (from shell/systemd)
@@ -400,6 +403,21 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                     log.info("Stop requested remotely. Shutting down gracefully...")
                     stop_requested = True
                     break
+                if bool(rs.get("desired_flatten", False)):
+                    try:
+                        log.info("Remote command: flatten positions. Closing all open positions...")
+                        res = broker.close_all_positions()
+                        if res.get("ok"):
+                            log.info(f"Flatten completed | closed={len(res.get('closed', []))} errors={len(res.get('errors', []))}")
+                        else:
+                            log.error(f"Flatten failed: {res}")
+                    except Exception as e:
+                        log.error(f"Error while flattening positions: {e}")
+                    finally:
+                        try:
+                            storage.clear_flatten_request()
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
@@ -734,6 +752,168 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                                     log.debug(f"Skip execution gate | exec={bool(decision.get('execute'))} conf={conf:.2f}/{min_conf:.2f} dir={direction} size_usd={size_usd:.2f} strat={strategy_name}")
                                 except Exception:
                                     pass
+            # 4b. Position management (LLM-driven exits)
+            try:
+                portfolio_state = context.get("portfolio", {}) or {}
+                positions = portfolio_state.get("positions", {})
+                # Build base symbol mapping from configured symbols
+                base_to_symbol = {}
+                for s in symbols:
+                    try:
+                        base = s.split("/", 1)[0].split(":", 1)[0].upper()
+                        base_to_symbol[base] = s
+                    except Exception:
+                        continue
+                # Normalize positions into iterable dicts
+                pos_list = []
+                if isinstance(positions, dict):
+                    for k, v in positions.items():
+                        if isinstance(v, dict):
+                            p = dict(v)
+                            p.setdefault("symbol", k)
+                            pos_list.append(p)
+                elif isinstance(positions, list):
+                    pos_list = positions
+                # Evaluate exits
+                for p in pos_list:
+                    try:
+                        sym = str(p.get("symbol") or p.get("coin") or "")
+                        if not sym:
+                            continue
+                        qty = float(p.get("qty") or p.get("size") or p.get("sz") or p.get("szi") or 0.0)
+                        if qty == 0.0:
+                            continue
+                        base = sym.upper()
+                        full_symbol = base_to_symbol.get(base, f"{base}/USD:USD")
+                        # Attach live price to position for the LLM
+                        cur_px = 0.0
+                        try:
+                            px_map = context.get("prices", {}).get(full_symbol, {})
+                            vals = [float(v) for v in (px_map.values() if isinstance(px_map, dict) else []) if float(v) > 0]
+                            if vals:
+                                import statistics
+                                cur_px = float(statistics.median(vals))
+                        except Exception:
+                            cur_px = 0.0
+                        pos_for_llm = {
+                            "symbol": full_symbol,
+                            "base": base,
+                            "qty": qty,
+                            "avg_price": float(p.get("avg_price", 0.0)),
+                            "leverage": float(p.get("leverage", 0.0)) if p.get("leverage") is not None else None,
+                            "current_price": cur_px,
+                        }
+                        pm_decision = orchestrator.decide_position_management(position=pos_for_llm, market_context=context)
+                        pm_conf = float(pm_decision.get("confidence", 0.0))
+                        pm_close = bool(pm_decision.get("close", False))
+                        # Use the same dynamic threshold as entries
+                        if pm_close and pm_conf >= float(dynamic_min_confidence):
+                            size_pct = float(pm_decision.get("size_pct", 1.0))
+                            order_type = str(pm_decision.get("order_type", "market")).lower()
+                            limit_off = float(pm_decision.get("limit_offset_pct", 0.0005))
+                            close_qty = abs(qty) * max(0.1, min(1.0, size_pct))
+                            limit_px = None
+                            if order_type == "limit" and cur_px > 0.0:
+                                # If long (qty>0) we sell above mid; if short (qty<0) we buy below mid
+                                limit_px = cur_px * (1.0 + limit_off) if qty > 0 else cur_px * (1.0 - limit_off)
+                            # Execute close
+                            close_resp = executor.close_position(symbol=full_symbol, qty=qty if size_pct >= 0.999 else (close_qty if qty > 0 else -close_qty), order_type=order_type, limit_price=limit_px)
+                            ok = bool(close_resp and isinstance(close_resp, dict) and close_resp.get("ok"))
+                            try:
+                                if ok:
+                                    log.info(f"Position closed (partial={size_pct<0.999}) | sym={full_symbol} qty={close_qty:.6f}/{abs(qty):.6f} type={order_type} conf={pm_conf:.2f}")
+                                else:
+                                    log.error(f"Close failed | sym={full_symbol} qty={close_qty:.6f} reason={(close_resp or {}).get('error') if isinstance(close_resp, dict) else 'unknown'}")
+                            except Exception:
+                                pass
+                            # Record to monitor (best-effort)
+                            try:
+                                if monitor_engine and ok:
+                                    entry_px = float(p.get("avg_price", 0.0))
+                                    exit_px = float(limit_px or cur_px or entry_px)
+                                    side = "sell" if qty > 0 else "buy"
+                                    pnl = (exit_px - entry_px) * (close_qty if qty > 0 else -close_qty)
+                                    monitor_engine.record_trade(
+                                        timestamp=time.time(),
+                                        strategy="position_exit",
+                                        symbol=full_symbol,
+                                        side=side,
+                                        size=float(close_qty),
+                                        entry=float(entry_px),
+                                        exit=float(exit_px),
+                                        pnl=float(pnl),
+                                        confidence=pm_conf,
+                                        metadata={"llm_decision": pm_decision, "close_response": close_resp},
+                                    )
+                            except Exception:
+                                pass
+                    except Exception:
+                        continue
+            except Exception:
+                # Position management errors should not stop trading
+                pass
+            # 4c. Bracket setup if not closing
+            try:
+                portfolio_state = context.get("portfolio", {}) or {}
+                positions = portfolio_state.get("positions", {})
+                pos_list = []
+                if isinstance(positions, dict):
+                    for k, v in positions.items():
+                        if isinstance(v, dict):
+                            p = dict(v)
+                            p.setdefault("symbol", k)
+                            pos_list.append(p)
+                elif isinstance(positions, list):
+                    pos_list = positions
+                for p in pos_list:
+                    try:
+                        sym = str(p.get("symbol") or p.get("coin") or "")
+                        if not sym:
+                            continue
+                        qty = float(p.get("qty") or p.get("size") or p.get("sz") or p.get("szi") or 0.0)
+                        if qty == 0.0:
+                            continue
+                        base = sym.split("/", 1)[0].split(":", 1)[0].upper()
+                        full_symbol = base + "/USD:USD" if "/" not in sym else sym
+                        if full_symbol in active_brackets:
+                            continue  # bracket already set; managed by 4b
+                        # Build a minimal pm_decision again to get bracket suggestion only
+                        cur_px = 0.0
+                        try:
+                            px_map = context.get("prices", {}).get(full_symbol, {})
+                            vals = [float(v) for v in (px_map.values() if isinstance(px_map, dict) else []) if float(v) > 0]
+                            if vals:
+                                import statistics
+                                cur_px = float(statistics.median(vals))
+                        except Exception:
+                            cur_px = 0.0
+                        pos_for_llm = {
+                            "symbol": full_symbol,
+                            "base": base,
+                            "qty": qty,
+                            "avg_price": float(p.get("avg_price", 0.0)),
+                            "leverage": float(p.get("leverage", 0.0)) if p.get("leverage") is not None else None,
+                            "current_price": cur_px,
+                        }
+                        dec = orchestrator.decide_position_management(position=pos_for_llm, market_context=context)
+                        if bool(dec.get("set_bracket", False)) and float(dec.get("confidence", 0.0)) >= float(dynamic_min_confidence):
+                            br = {
+                                "tp_pct": float(dec.get("tp_pct", 0.008)),
+                                "sl_pct": float(dec.get("sl_pct", 0.005)),
+                                "trailing_pct": float(dec.get("trailing_pct", 0.0)),
+                                "entry_price": float(p.get("avg_price", 0.0)) or cur_px or 0.0,
+                                "direction": 1.0 if qty > 0 else -1.0,
+                            }
+                            if br["entry_price"] > 0.0:
+                                active_brackets[full_symbol] = br
+                                try:
+                                    log.info(f"Bracket set | sym={full_symbol} tp={br['tp_pct']*100:.2f}% sl={br['sl_pct']*100:.2f}% trail={br['trailing_pct']*100:.2f}%")
+                                except Exception:
+                                    pass
+                    except Exception:
+                        continue
+            except Exception:
+                pass
 
             # 5. Online learning: evaluate matured pending trades (PNL proxy) and feed back
             try:
@@ -831,6 +1011,77 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                         storage.record_runtime_heartbeat(pid=pid)
                     except Exception:
                         pass
+                # Enforce proactive brackets with faster checks (every ~2s)
+                try:
+                    now = time.time()
+                    if now - last_bracket_check_ts >= 2.0 and active_brackets:
+                        last_bracket_check_ts = now
+                        # Fetch fresh prices for bracketed symbols
+                        bracket_symbols = list(active_brackets.keys())
+                        price_map = context_aggregator._get_prices(bracket_symbols)
+                        for full_symbol, br in list(active_brackets.items()):
+                            pxs = price_map.get(full_symbol, {})
+                            cur_px = 0.0
+                            try:
+                                vals = [float(v) for v in (pxs.values() if isinstance(pxs, dict) else []) if float(v) > 0]
+                                if vals:
+                                    import statistics
+                                    cur_px = float(statistics.median(vals))
+                            except Exception:
+                                cur_px = 0.0
+                            if cur_px <= 0.0:
+                                continue
+                            entry_px = float(br.get("entry_price", 0.0))
+                            tp_pct = float(br.get("tp_pct", 0.0))
+                            sl_pct = float(br.get("sl_pct", 0.0))
+                            trailing_pct = float(br.get("trailing_pct", 0.0))
+                            direction = 1.0 if float(br.get("direction", 1.0)) >= 0 else -1.0
+                            # Compute triggers
+                            tp_trigger = entry_px * (1.0 + (tp_pct * direction))
+                            sl_trigger = entry_px * (1.0 - (sl_pct * direction))
+                            # Update trailing stop if configured and in profit
+                            if trailing_pct > 0.0:
+                                if direction > 0 and cur_px > entry_px:
+                                    new_entry = max(entry_px, cur_px * (1.0 - trailing_pct))
+                                    br["entry_price"] = new_entry
+                                elif direction < 0 and cur_px < entry_px:
+                                    new_entry = min(entry_px, cur_px * (1.0 + trailing_pct))
+                                    br["entry_price"] = new_entry
+                                    entry_px = float(br["entry_price"])
+                                    tp_trigger = entry_px * (1.0 + (tp_pct * direction))
+                                    sl_trigger = entry_px * (1.0 - (sl_pct * direction))
+                            # Check hit
+                            hit_tp = (cur_px >= tp_trigger) if direction > 0 else (cur_px <= tp_trigger)
+                            hit_sl = (cur_px <= sl_trigger) if direction > 0 else (cur_px >= sl_trigger)
+                            if hit_tp or hit_sl:
+                                # Determine qty from current portfolio snapshot (best-effort)
+                                pf = broker.get_portfolio()
+                                resp = pf.get("response", {}) if isinstance(pf, dict) else {}
+                                positions = resp.get("positions", {})
+                                qty = 0.0
+                                # Look for base symbol match
+                                base = full_symbol.split("/", 1)[0].split(":", 1)[0].upper()
+                                if isinstance(positions, dict):
+                                    p = positions.get(base) or positions.get(full_symbol) or {}
+                                    try:
+                                        qty = float(p.get("qty") or p.get("size") or p.get("sz") or p.get("szi") or 0.0)
+                                    except Exception:
+                                        qty = 0.0
+                                # Execute market close
+                                if qty != 0.0:
+                                    close_resp = executor.close_position(symbol=full_symbol, qty=qty, order_type="market", limit_price=None)
+                                    ok = bool(close_resp and isinstance(close_resp, dict) and close_resp.get("ok"))
+                                    try:
+                                        if ok:
+                                            log.info(f"Bracket triggered ({'TP' if hit_tp else 'SL'}) | sym={full_symbol} px={cur_px:.2f}")
+                                        else:
+                                            log.error(f"Bracket close failed | sym={full_symbol} reason={(close_resp or {}).get('error') if isinstance(close_resp, dict) else 'unknown'}")
+                                    except Exception:
+                                        pass
+                                # Remove bracket
+                                active_brackets.pop(full_symbol, None)
+                except Exception:
+                    pass
                 time.sleep(0.5)
                 slept += 0.5
 

@@ -70,7 +70,7 @@ class InteractiveShell:
         exchange = getattr(getattr(cfg, "general", None), "exchange_id", "hyperliquid") if cfg else "hyperliquid"
         completer = WordCompleter([
             "start", "stop", "restart", "pause", "resume", "status", "ps", "pids", "enforce", "killdups", "monitor",
-            "trades", "positions", "performance", "portfolio", "strategies", "weights",
+            "trades", "positions", "flatten", "performance", "portfolio", "strategies", "weights",
             "risk", "config", "logs", "help", "exit", "quit", "clear", "version",
         ], ignore_case=True)
 
@@ -197,7 +197,7 @@ class InteractiveShell:
 
     def _print_help(self) -> None:
         self.console.print(
-            "Commands: start, stop [--force], restart [--force], pause, resume, status, monitor, trades, positions, performance, portfolio, strategies, weights, risk, config, logs, help, exit, clear, version"
+            "Commands: start, stop [--force], restart [--force], pause, resume, status, monitor, trades, positions, flatten, performance, portfolio, strategies, weights, risk, config, logs, help, exit, clear, version"
         )
 
     def _trading_target(self) -> None:
@@ -547,6 +547,15 @@ class InteractiveShell:
     def _cmd_positions(self) -> None:
         rep = self._get_reporter()
         render_positions(rep.portfolio_summary())
+
+    def _cmd_flatten(self) -> None:
+        # Request the running bot to close all open positions (non-blocking)
+        try:
+            storage = StorageManager(self.context.get("storage_path", "~/.cryptobot/monitor.db"))
+            storage.request_flatten_positions()
+            self.console.print("[green]Requested flatten of all positions. Runner will act shortly.[/green]")
+        except Exception as e:
+            self.console.print(f"[red]Flatten error:[/red] {e}")
 
     def _cmd_performance(self, args: List[str]) -> None:
         # Coarse performance summary from trades

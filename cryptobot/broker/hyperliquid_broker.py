@@ -196,14 +196,35 @@ class HyperliquidBroker:
                 if hasattr(self.client, "order"):
                     response = None
                     try:
+                        # Common signature: order(coin, is_buy, sz, limit_px)
                         response = self.client.order(hl_symbol, is_buy, float(q_sz), limit_px)  # type: ignore[misc]
+                    except TypeError as e:
+                        # Alternate signature requires order_type
+                        if "order_type" in str(e):
+                            try:
+                                # Try appending positional order_type
+                                response = self.client.order(hl_symbol, is_buy, float(q_sz), limit_px, "limit")  # type: ignore[misc]
+                            except TypeError:
+                                # Try keyword order_type
+                                response = self.client.order(hl_symbol, is_buy, float(q_sz), limit_px, order_type="limit")  # type: ignore[misc]
+                        else:
+                            raise
                     except Exception as e:
                         if "float_to_wire" in str(e) or "rounding" in str(e):
                             step = self._get_size_step(hl_symbol)
                             new_q = max(0.0, float(Decimal(str(q_sz)) - Decimal(str(step))))
                             if new_q > 0.0:
                                 log.debug(f"Retrying limit order with adjusted size due to wire rounding: {q_sz} -> {new_q}")
-                                response = self.client.order(hl_symbol, is_buy, float(new_q), limit_px)  # type: ignore[misc]
+                                try:
+                                    response = self.client.order(hl_symbol, is_buy, float(new_q), limit_px)  # type: ignore[misc]
+                                except TypeError as e2:
+                                    if "order_type" in str(e2):
+                                        try:
+                                            response = self.client.order(hl_symbol, is_buy, float(new_q), limit_px, "limit")  # type: ignore[misc]
+                                        except TypeError:
+                                            response = self.client.order(hl_symbol, is_buy, float(new_q), limit_px, order_type="limit")  # type: ignore[misc]
+                                    else:
+                                        raise
                                 q_sz = new_q
                             else:
                                 raise
@@ -219,7 +240,19 @@ class HyperliquidBroker:
             # 3) Market orders without market_open: try generic 'order(coin, is_buy, sz)'
             if hasattr(self.client, "order"):
                 q_sz = self._quantize_size(hl_symbol, float(size))
-                response = self.client.order(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                response = None
+                try:
+                    # Some SDKs: order(coin, is_buy, sz)
+                    response = self.client.order(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                except TypeError as e:
+                    if "order_type" in str(e):
+                        # Try including order_type='market'
+                        try:
+                            response = self.client.order(hl_symbol, is_buy, float(q_sz), "market")  # type: ignore[misc]
+                        except TypeError:
+                            response = self.client.order(hl_symbol, is_buy, float(q_sz), order_type="market")  # type: ignore[misc]
+                    else:
+                        raise
                 log.debug(f"Hyperliquid order(positional, market) response: {response}")
                 return {"ok": True, "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz), "type": "market"}, "response": response, "ts": time.time()}
         except Exception as e:  # pragma: no cover - SDK runtime path
@@ -570,6 +603,48 @@ class HyperliquidBroker:
             return {"ok": False, "error": str(e), "ts": time.time()}
         # 3) Fallback: not available
         return {"ok": False, "error": "Portfolio API not available in this SDK", "ts": time.time()}
+
+    def close_all_positions(self) -> Dict[str, Any]:
+        """
+        Flatten all open positions by placing opposing market orders for the full size.
+        Returns a summary of close attempts.
+        """
+        summary: Dict[str, Any] = {"ok": True, "closed": [], "errors": []}
+        try:
+            pf = self.get_portfolio()
+            resp = pf.get("response", {}) if isinstance(pf, dict) else {}
+            positions = resp.get("positions", {}) if isinstance(resp, dict) else {}
+            # Normalize dict and list shapes
+            pos_list = []
+            if isinstance(positions, dict):
+                for k, v in positions.items():
+                    if isinstance(v, dict):
+                        v = dict(v)
+                        v.setdefault("symbol", k)
+                        pos_list.append(v)
+            elif isinstance(positions, list):
+                pos_list = positions
+            for p in pos_list:
+                try:
+                    sym = str(p.get("symbol") or p.get("coin") or "")
+                    qty = float(p.get("qty") or p.get("size") or p.get("sz") or p.get("szi") or 0.0)
+                    if not sym or qty == 0.0:
+                        continue
+                    side = "sell" if qty > 0 else "buy"
+                    sz = abs(qty)
+                    # Place reduce-only market order by convention (some SDKs infer reduce-only; we best-effort place market)
+                    r = self.place_order(symbol=sym, side=side, size=sz, leverage=1, order_type="market")
+                    if r.get("ok"):
+                        summary["closed"].append({"symbol": sym, "qty": qty, "resp": r})
+                    else:
+                        summary["errors"].append({"symbol": sym, "qty": qty, "error": r.get("error")})
+                except Exception as e:
+                    summary["ok"] = False
+                    summary["errors"].append({"symbol": p.get("symbol"), "error": str(e)})
+        except Exception as e:
+            summary["ok"] = False
+            summary["errors"].append({"error": str(e)})
+        return summary
 
     def get_funding_rate(self, symbol: str) -> float:
         """Return current funding rate for a symbol (% per funding interval)."""

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from cryptobot.llm.client import LLMClient
-from cryptobot.llm.prompts import ALLOCATION_PROMPT_TEMPLATE, TRADE_PROMPT_TEMPLATE
+from cryptobot.llm.prompts import ALLOCATION_PROMPT_TEMPLATE, TRADE_PROMPT_TEMPLATE, POSITION_PROMPT_TEMPLATE
 from cryptobot.core.logging import get_llm_logger
 
 
@@ -235,5 +235,105 @@ class LLMOrchestrator:
         })
         if len(self.performance_history) > 1000:
             self.performance_history = self.performance_history[-1000:]
+
+    # Position management (exits)
+    def _build_position_prompt(self, context: Dict[str, Any]) -> str:
+        return POSITION_PROMPT_TEMPLATE.format(
+            position=context.get("position"),
+            market_context=context.get("market"),
+            portfolio_state=context.get("portfolio"),
+            risk_tolerance=context.get("risk_tolerance"),
+        )
+
+    def _parse_position_decision(self, llm_response: Dict[str, Any]) -> Dict[str, Any]:
+        close = bool(llm_response.get("close", False))
+        size_pct = float(llm_response.get("size_pct", 0.0))
+        order_type = str(llm_response.get("order_type", "market")).lower()
+        limit_offset_pct = float(llm_response.get("limit_offset_pct", 0.0005))
+        confidence = float(llm_response.get("confidence", 0.0))
+        set_bracket = bool(llm_response.get("set_bracket", False))
+        tp_pct = float(llm_response.get("tp_pct", 0.0))
+        sl_pct = float(llm_response.get("sl_pct", 0.0))
+        trailing_pct = float(llm_response.get("trailing_pct", 0.0))
+        # Clamp values
+        if close:
+            size_pct = max(0.1, min(1.0, size_pct))
+        else:
+            size_pct = 0.0
+        if order_type not in {"market", "limit"}:
+            order_type = "market"
+        limit_offset_pct = max(0.0001, min(0.005, limit_offset_pct))
+        # Bracket clamps
+        if set_bracket and not close:
+            tp_pct = max(0.002, min(0.02, tp_pct or 0.008))
+            sl_pct = max(0.003, min(0.02, sl_pct or 0.005))
+            trailing_pct = max(0.0, min(0.02, trailing_pct or 0.0))
+        else:
+            set_bracket = False
+        return {
+            "close": close,
+            "size_pct": size_pct,
+            "order_type": order_type,
+            "limit_offset_pct": limit_offset_pct,
+            "confidence": max(0.0, min(1.0, confidence)),
+            "set_bracket": set_bracket,
+            "tp_pct": tp_pct if set_bracket else 0.0,
+            "sl_pct": sl_pct if set_bracket else 0.0,
+            "trailing_pct": trailing_pct if set_bracket else 0.0,
+        }
+
+    def decide_position_management(
+        self,
+        *,
+        position: Dict[str, Any],
+        market_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        context = {
+            "position": position,
+            "market": market_context,
+            "portfolio": market_context.get("portfolio", {}),
+            "risk_tolerance": self._calculate_risk_tolerance(),
+        }
+        get_llm_logger().debug({
+            "event": "orchestrator_build_prompt",
+            "type": "position",
+            "context_keys": list(context.keys()),
+        })
+        prompt = self._build_position_prompt(context)
+        response = self.llm.call(prompt=prompt, json_mode=True)
+        decision = self._parse_position_decision(response)
+        get_llm_logger().debug({
+            "event": "orchestrator_decision",
+            "type": "position",
+            "decision": decision,
+        })
+        # Record decision (best-effort)
+        try:
+            from time import time as _time
+            from json import dumps as _dumps
+            from cryptobot.monitor.insights import build_decision as _build_decision
+            if self._decision_sink:
+                d = _build_decision(
+                    timestamp=_time(),
+                    decision_type="position",
+                    prompt=prompt,
+                    raw_response=response if isinstance(response, dict) else _dumps(response),
+                    metadata={"position": position},
+                )
+                self._decision_sink(
+                    {
+                        "timestamp": d.timestamp,
+                        "decision_type": d.decision_type,
+                        "prompt": d.prompt,
+                        "response": d.response,
+                        "reasoning": d.reasoning,
+                        "sentiment": d.sentiment,
+                        "confidence": d.confidence,
+                        "metadata": d.metadata,
+                    }
+                )
+        except Exception:
+            pass
+        return decision
 
 
