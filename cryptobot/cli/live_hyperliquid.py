@@ -517,6 +517,11 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                                 lev = min(lev, 3)
                             decision["leverage"] = max(1, min(lev, max_lev_cfg))
                             decision["symbol"] = opportunity.get("symbol", symbols[0])
+                            # Provide entry price for proper USD -> coin size conversion
+                            try:
+                                decision["entry_price"] = float(opportunity.get("price", 0.0) or opportunity.get("mid", 0.0) or 0.0)
+                            except Exception:
+                                decision["entry_price"] = 0.0
                             executor.execute_strategy(strategy_name, decision, weights)
                             performance_tracker.record_trade_start(
                                 strategy=strategy_name,

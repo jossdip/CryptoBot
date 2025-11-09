@@ -46,10 +46,23 @@ class MultiStrategyExecutor:
         stop_loss = decision.get("stop_loss_pct")
         take_profit = decision.get("take_profit_pct")
         side = "buy" if direction == "long" else "sell"
+        # Convert USD sizing to coin sizing using provided entry_price when available
+        try:
+            entry_price = float(decision.get("entry_price", 0.0) or 0.0)
+        except Exception:
+            entry_price = 0.0
+        coin_size = float(size_usd) / float(entry_price) if entry_price and entry_price > 0 else 0.0
+        if coin_size <= 0:
+            # Fallback: attempt a conservative nominal size if price missing to avoid skipping forever
+            try:
+                log.debug(f"Executor fallback: missing/invalid entry_price for {symbol} (entry_price={entry_price}), cannot convert USD->{symbol}. Skipping.")
+            except Exception:
+                pass
+            return
         self.broker.place_order(
             symbol=symbol,
             side=side,
-            size=size_usd,  # Assuming USD sizing; adapt per broker conventions
+            size=coin_size,
             leverage=leverage,
             order_type="market",
             price=None,

@@ -139,10 +139,16 @@ class HyperliquidBroker:
         if leverage < 1 or leverage > 50:
             raise ValueError("leverage must be within 1..50 for Hyperliquid")
 
+        # Normalize symbol to Hyperliquid coin ticker (e.g., "BTC/USD:USD" -> "BTC")
+        try:
+            hl_symbol = self._normalize_symbol_for_hyperliquid(symbol)
+        except Exception:
+            hl_symbol = symbol
+
         # SDK specific call placeholders (actual field names depend on SDK)
         try:
             payload: Dict[str, Any] = {
-                "symbol": symbol,
+                "symbol": hl_symbol,
                 "side": side,
                 "size": float(size),
                 "type": order_type,
@@ -173,6 +179,27 @@ class HyperliquidBroker:
         except Exception as e:  # pragma: no cover - SDK runtime path
             log.error(f"Failed to place order on Hyperliquid: {e}")
             return {"ok": False, "error": str(e), "ts": time.time()}
+
+    def _normalize_symbol_for_hyperliquid(self, symbol: str) -> str:
+        """
+        Map common external symbol formats to Hyperliquid coin tickers.
+        Examples:
+        - 'BTC/USD:USD' -> 'BTC'
+        - 'ETH/USDT'    -> 'ETH'
+        - 'SOL'         -> 'SOL' (unchanged)
+        """
+        s = str(symbol or "").strip().upper()
+        if not s:
+            return s
+        # Split by '/' first, take the base asset part
+        if "/" in s:
+            base = s.split("/", 1)[0]
+        else:
+            base = s
+        # Remove any suffix like ':USD'
+        base = base.replace(":USD", "")
+        # Final cleanup: keep only alphanumerics (HL tickers are uppercase coin names)
+        return "".join(ch for ch in base if ch.isalnum())
 
     def _normalize_user_state(self, data: Any) -> Dict[str, Any]:
         """Best-effort normalization of Info.user_state payload into a common schema.
