@@ -166,6 +166,7 @@ class HyperliquidBroker:
             # 1) Preferred for market orders: use market_open with positional args and quantized size
             if order_type == "market" and hasattr(self.client, "market_open"):
                 q_sz = self._quantize_size(hl_symbol, float(size))
+                response = None
                 try:
                     response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
                 except Exception as e:
@@ -179,7 +180,11 @@ class HyperliquidBroker:
                             q_sz = new_q
                         else:
                             raise
-                log.debug(f"Hyperliquid market_open(positional) response: {response}")
+                    else:
+                        # Propagate to outer handler
+                        raise
+                if response is not None:
+                    log.debug(f"Hyperliquid market_open(positional) response: {response}")
                 return {"ok": True, "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz), "type": "market"}, "response": response, "ts": time.time()}
 
             # 2) Limit orders: attempt positional 'order(coin, is_buy, sz, limit_px)' if available; else market fallback
@@ -189,6 +194,7 @@ class HyperliquidBroker:
                 q_sz = self._quantize_size(hl_symbol, float(size))
                 limit_px = float(price)
                 if hasattr(self.client, "order"):
+                    response = None
                     try:
                         response = self.client.order(hl_symbol, is_buy, float(q_sz), limit_px)  # type: ignore[misc]
                     except Exception as e:
@@ -201,7 +207,10 @@ class HyperliquidBroker:
                                 q_sz = new_q
                             else:
                                 raise
-                    log.debug(f"Hyperliquid order(positional, limit) response: {response}")
+                        else:
+                            raise
+                    if response is not None:
+                        log.debug(f"Hyperliquid order(positional, limit) response: {response}")
                     return {"ok": True, "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz), "limit_px": limit_px, "type": "limit"}, "response": response, "ts": time.time()}
                 # Fallback: place a market order if limit path not available
                 response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
@@ -382,16 +391,22 @@ class HyperliquidBroker:
                 if isinstance(data, dict) and key in data:
                     pos_container = data[key]
                     break
+            # Hyperliquid testnet payload often exposes positions under 'assetPositions' as a list of objects
+            if pos_container is None and isinstance(data, dict) and "assetPositions" in data:
+                pos_container = data.get("assetPositions")
             positions: Dict[str, Any] = {}
             if isinstance(pos_container, list):
                 for p in pos_container:
+                    # Support both flat position dicts and HL shape: {'type': 'oneWay', 'position': {...}}
+                    if isinstance(p, dict) and "position" in p and isinstance(p["position"], dict):
+                        p = p["position"]
                     if not isinstance(p, dict):
                         continue
                     sym = str(p.get("symbol") or p.get("coin") or "")
                     if not sym:
                         continue
                     qty_val = None
-                    for qk in ("sz", "size", "qty", "positionSize", "contracts"):
+                    for qk in ("sz", "szi", "size", "qty", "positionSize", "contracts"):
                         if qk in p:
                             try:
                                 qty_val = float(p[qk])
@@ -410,13 +425,24 @@ class HyperliquidBroker:
                                 pass
                     # Optional leverage extraction if present
                     lev_val = None
-                    for lk in ("leverage", "lev", "x", "isolatedLeverage"):
-                        if lk in p:
-                            try:
-                                lev_val = float(p[lk])
-                                break
-                            except Exception:
-                                pass
+                    # HL can present leverage as {'type':'cross','value':20}
+                    if "leverage" in p:
+                        try:
+                            lev_obj = p.get("leverage")
+                            if isinstance(lev_obj, dict) and "value" in lev_obj:
+                                lev_val = float(lev_obj.get("value"))
+                            else:
+                                lev_val = float(lev_obj)
+                        except Exception:
+                            lev_val = None
+                    if lev_val is None:
+                        for lk in ("lev", "x", "isolatedLeverage"):
+                            if lk in p:
+                                try:
+                                    lev_val = float(p[lk])
+                                    break
+                                except Exception:
+                                    pass
                     pos_obj = {"symbol": sym, "qty": float(qty_val), "avg_price": float(avg_px)}
                     if lev_val is not None:
                         pos_obj["leverage"] = float(lev_val)
@@ -426,7 +452,7 @@ class HyperliquidBroker:
                     try:
                         qty_val = None
                         if isinstance(p, dict):
-                            for qk in ("sz", "size", "qty", "positionSize", "contracts"):
+                            for qk in ("sz", "szi", "size", "qty", "positionSize", "contracts"):
                                 if qk in p:
                                     qty_val = float(p[qk])
                                     break
@@ -440,13 +466,23 @@ class HyperliquidBroker:
                         if qty_val is not None:
                             lev_val = None
                             if isinstance(p, dict):
-                                for lk in ("leverage", "lev", "x", "isolatedLeverage"):
-                                    if lk in p:
-                                        try:
-                                            lev_val = float(p[lk])
-                                            break
-                                        except Exception:
-                                            pass
+                                if "leverage" in p:
+                                    try:
+                                        lev_obj = p.get("leverage")
+                                        if isinstance(lev_obj, dict) and "value" in lev_obj:
+                                            lev_val = float(lev_obj.get("value"))
+                                        else:
+                                            lev_val = float(lev_obj)
+                                    except Exception:
+                                        lev_val = None
+                                if lev_val is None:
+                                    for lk in ("lev", "x", "isolatedLeverage"):
+                                        if lk in p:
+                                            try:
+                                                lev_val = float(p[lk])
+                                                break
+                                            except Exception:
+                                                pass
                             pos_obj = {"symbol": str(sym), "qty": float(qty_val), "avg_price": float(avg_px)}
                             if lev_val is not None:
                                 pos_obj["leverage"] = float(lev_val)
