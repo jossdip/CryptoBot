@@ -147,35 +147,61 @@ class HyperliquidBroker:
 
         # SDK specific call placeholders (actual field names depend on SDK)
         try:
-            payload: Dict[str, Any] = {
-                "symbol": hl_symbol,
-                "side": side,
-                "size": float(size),
-                "type": order_type,
-                "leverage": int(leverage),
+            # Best-effort: attempt multiple call signatures depending on SDK variant
+            is_buy = side.lower() == "buy"
+            # Some SDKs require leverage to be set separately; attempt if available (best-effort)
+            try:
+                if hasattr(self.client, "update_leverage"):
+                    # Typical signature: update_leverage(coin="BTC", leverage=5)
+                    self.client.update_leverage(coin=hl_symbol, leverage=int(leverage))  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+            # 1) Preferred explicit signature
+            if order_type == "market" and hasattr(self.client, "market_open"):
+                response = self.client.market_open(coin=hl_symbol, is_buy=is_buy, sz=float(size))  # type: ignore[attr-defined]
+                log.debug(f"Hyperliquid market_open response: {response}")
+                return {"ok": True, "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(size), "type": "market"}, "response": response, "ts": time.time()}
+
+            # 2) Generic place_order with coin/is_buy/sz/(limit_px)
+            payload_generic: Dict[str, Any] = {
+                "coin": hl_symbol,
+                "is_buy": is_buy,
+                "sz": float(size),
             }
             if order_type == "limit":
                 if price is None:
                     raise ValueError("price is required for limit orders")
-                payload["price"] = float(price)
-            if stop_loss is not None:
-                payload["stop_loss"] = float(stop_loss)
-            if take_profit is not None:
-                payload["take_profit"] = float(take_profit)
-            if client_id:
-                payload["client_id"] = client_id
+                payload_generic["limit_px"] = float(price)
+                payload_generic["post_only"] = True
+            response: Dict[str, Any] = {}
+            try:
+                response = self.client.place_order(**payload_generic)  # type: ignore[arg-type]
+                log.debug(f"Hyperliquid place_order response: {response}")
+                return {"ok": True, "request": payload_generic, "response": response, "ts": time.time()}
+            except TypeError:
+                # 3) Fallback to original payload names if SDK expects them
+                payload: Dict[str, Any] = {
+                    "symbol": hl_symbol,
+                    "side": side,
+                    "size": float(size),
+                    "type": order_type,
+                    "leverage": int(leverage),
+                }
+                if order_type == "limit":
+                    if price is None:
+                        raise ValueError("price is required for limit orders")
+                    payload["price"] = float(price)
+                if stop_loss is not None:
+                    payload["stop_loss"] = float(stop_loss)
+                if take_profit is not None:
+                    payload["take_profit"] = float(take_profit)
+                if client_id:
+                    payload["client_id"] = client_id
 
-            # Example: response = self.client.place_order(**payload)
-            # As SDK specifics may differ, keep a generic call with best effort
-            response: Dict[str, Any] = self.client.place_order(**payload)  # type: ignore[arg-type]
-
-            log.debug(f"Hyperliquid order response: {response}")
-            return {
-                "ok": True,
-                "request": payload,
-                "response": response,
-                "ts": time.time(),
-            }
+                response = self.client.place_order(**payload)  # type: ignore[arg-type]
+                log.debug(f"Hyperliquid fallback place_order response: {response}")
+                return {"ok": True, "request": payload, "response": response, "ts": time.time()}
         except Exception as e:  # pragma: no cover - SDK runtime path
             log.error(f"Failed to place order on Hyperliquid: {e}")
             return {"ok": False, "error": str(e), "ts": time.time()}

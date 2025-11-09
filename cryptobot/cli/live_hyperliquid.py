@@ -522,7 +522,12 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                                 decision["entry_price"] = float(opportunity.get("price", 0.0) or opportunity.get("mid", 0.0) or 0.0)
                             except Exception:
                                 decision["entry_price"] = 0.0
-                            executor.execute_strategy(strategy_name, decision, weights)
+                            # Log attempt before execution
+                            try:
+                                log.info(f"Attempting execution | strat={strategy_name} sym={decision['symbol']} dir={direction} size_usd={size_usd:.2f} lev={int(decision.get('leverage',1))} conf={conf:.2f}")
+                            except Exception:
+                                pass
+                            resp = executor.execute_strategy(strategy_name, decision, weights)
                             performance_tracker.record_trade_start(
                                 strategy=strategy_name,
                                 entry_price=float(opportunity.get("price", 0.0) or opportunity.get("mid", 0.0) or 0.0),
@@ -530,7 +535,30 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                                 symbol=decision["symbol"],
                             )
                             try:
-                                log.info(f"Executed {strategy_name} on {decision['symbol']} | size_usd={size_usd:.2f} | lev={int(decision.get('leverage', 1))} | dir={direction} | conf={conf:.2f}")
+                                ok = bool(resp and isinstance(resp, dict) and resp.get("ok"))
+                                if ok:
+                                    log.info(f"Executed {strategy_name} on {decision['symbol']} | size_usd={size_usd:.2f} | lev={int(decision.get('leverage', 1))} | dir={direction} | conf={conf:.2f}")
+                                    # Also record into monitor storage so it appears under Recent Trades (entry-only snapshot)
+                                    if monitor_engine:
+                                        try:
+                                            entry_px = float(decision.get("entry_price", 0.0) or 0.0)
+                                            coin_sz = float(size_usd) / entry_px if entry_px > 0 else 0.0
+                                            monitor_engine.record_trade(
+                                                timestamp=time.time(),
+                                                strategy=strategy_name,
+                                                symbol=decision["symbol"],
+                                                side="buy" if direction == "long" else "sell",
+                                                size=float(coin_sz if coin_sz > 0 else size_usd),
+                                                entry=float(entry_px if entry_px > 0 else size_usd),
+                                                exit=float(entry_px if entry_px > 0 else size_usd),
+                                                pnl=0.0,
+                                                confidence=conf,
+                                                metadata={"llm_decision": decision, "resp": resp},
+                                            )
+                                        except Exception:
+                                            pass
+                                else:
+                                    log.error(f"Execution failed {strategy_name} on {decision['symbol']} | dir={direction} | reason={(resp or {}).get('error') if isinstance(resp, dict) else 'unknown'}")
                             except Exception:
                                 pass
                         else:
