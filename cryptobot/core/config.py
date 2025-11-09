@@ -74,6 +74,8 @@ class LLMConfig(BaseModel):
     min_opportunity_score: float = 0.0  # Score minimum avant appel LLM (0.0 = pas de filtre, 0.6+ = filtre actif)
     monthly_budget_usd: float = 0.0  # Budget mensuel max (0.0 = illimité)
     min_confidence_to_execute: float = 0.6  # Seuil d'exécution des trades (par défaut 0.6)
+    evaluation_horizon_sec: int = 60  # Horizon d'évaluation pour feedback (PNL proxy)
+    adaptive_fallback_enabled: bool = True  # Active le fallback adaptatif quand LLM est indisponible
 
 
 class StrategyWeightsConfig(BaseModel):

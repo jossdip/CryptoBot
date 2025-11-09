@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import argparse
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import os
 import threading
 from pathlib import Path
@@ -184,6 +184,16 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
             log.warning(f"Portfolio snapshot unavailable: {pf.get('error')}")
     except Exception:
         pass
+    # Initialize session equity peak for circuit breaker tracking
+    session_peak_equity = None
+    try:
+        if pf.get("ok"):
+            resp = pf.get("response", {})
+            eq0 = float(resp.get("equity", resp.get("balance", 0.0)))
+            if eq0 > 0.0:
+                session_peak_equity = eq0
+    except Exception:
+        pass
 
     # Record runtime start and clear any old stop requests
     try:
@@ -317,6 +327,21 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
     max_opportunities_per_cycle = int(getattr(cfg.llm, "max_opportunities_per_cycle", 999))
     min_opportunity_score = float(getattr(cfg.llm, "min_opportunity_score", 0.0))
     budget_exceeded = False
+    # Online learning (PNL proxy) parameters
+    evaluation_horizon_sec = int(getattr(cfg.llm, "evaluation_horizon_sec", max(30, int(getattr(cfg.llm, "decision_interval_sec", 30)))))  # default 60 in config
+    adaptive_fallback_enabled = bool(getattr(cfg.llm, "adaptive_fallback_enabled", True))
+    pending_evaluations: List[Dict[str, Any]] = []
+    # Circuit breaker parameters
+    try:
+        daily_dd_limit_pct = float(getattr(getattr(cfg, "risk", object()), "max_daily_drawdown_pct", 0.0))
+    except Exception:
+        daily_dd_limit_pct = 0.0
+    circuit_breaker_tripped = False
+    # Base confidence gate
+    try:
+        base_min_confidence = float(getattr(getattr(cfg, "llm", object()), "min_confidence_to_execute", 0.6))
+    except Exception:
+        base_min_confidence = 0.6
 
     def _score_opportunity(opportunity: Dict[str, Any], strategy_name: str, context: Dict[str, Any]) -> float:
         """Score préalable d'une opportunité (0-1) avant appel LLM pour réduire coûts."""
@@ -403,11 +428,74 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                 include_orderbook=bool(getattr(getattr(cfg, "data", None), "include_orderbook", True)),
             )
 
+            # Circuit breaker: compute session drawdown and gate trading if exceeded
+            try:
+                portfolio_state = context.get("portfolio", {}) or {}
+                cur_eq = float(portfolio_state.get("equity", portfolio_state.get("balance", 0.0)))
+                if cur_eq > 0.0:
+                    if session_peak_equity is None or cur_eq > float(session_peak_equity):
+                        session_peak_equity = float(cur_eq)
+                    if daily_dd_limit_pct > 0.0 and session_peak_equity and session_peak_equity > 0.0:
+                        dd_pct = max(0.0, (float(session_peak_equity) - float(cur_eq)) / float(session_peak_equity) * 100.0)
+                        if dd_pct >= daily_dd_limit_pct and not circuit_breaker_tripped:
+                            circuit_breaker_tripped = True
+                            try:
+                                log.error(f"CIRCUIT BREAKER TRIPPED: drawdown={dd_pct:.2f}% >= limit={daily_dd_limit_pct:.2f}% — pausing new trades (heartbeat continues)")
+                            except Exception:
+                                pass
+                # Gate allocation/trading entirely when tripped
+            except Exception:
+                pass
+
+            # Dynamic confidence tuning based on recent win rate (last 50 proxy trades)
+            dynamic_min_confidence = base_min_confidence
+            try:
+                recent = performance_tracker.trades[-50:]
+                if recent:
+                    wins = sum(1 for t in recent if float(t.get("pnl", 0.0)) > 0.0)
+                    win_rate = float(wins) / float(max(1, len(recent)))
+                    adj = -0.1 if win_rate > 0.6 else (0.1 if win_rate < 0.4 else 0.0)
+                    dynamic_min_confidence = max(0.5, min(0.9, base_min_confidence + adj))
+            except Exception:
+                dynamic_min_confidence = base_min_confidence
+
             # 2. LLM decides strategy weights (optimisé: moins fréquent)
             current_time = time.time()
-            if budget_exceeded:
-                # Pas d'appels LLM — réutiliser poids précédents
-                weights = orchestrator.weights
+            if budget_exceeded or circuit_breaker_tripped:
+                # Pas d'appels LLM — utiliser fallback adaptatif si activé, sinon réutiliser poids précédents
+                if adaptive_fallback_enabled and (current_time - last_allocation_ts >= allocation_interval_sec):
+                    try:
+                        weights = weight_manager.calculate_adaptive_weights()
+                        orchestrator.weights = weights
+                        log.info(
+                            "Adaptive fallback allocation (LLM paused): "
+                            + ", ".join([
+                                f"{n}={getattr(weights, n):.2f}" for n in [
+                                    "market_making","momentum","scalping","arbitrage","breakout","sniping"
+                                ]
+                            ])
+                        )
+                        last_allocation_ts = current_time
+                        # Persist new weights for future warm start
+                        try:
+                            if monitor_engine:
+                                monitor_engine.storage.record_weights(
+                                    timestamp=current_time,
+                                    weights={
+                                        "market_making": float(weights.market_making),
+                                        "momentum": float(weights.momentum),
+                                        "scalping": float(weights.scalping),
+                                        "arbitrage": float(weights.arbitrage),
+                                        "breakout": float(weights.breakout),
+                                        "sniping": float(weights.sniping),
+                                    },
+                                )
+                        except Exception:
+                            pass
+                    except Exception:
+                        weights = orchestrator.weights
+                else:
+                    weights = orchestrator.weights
             else:
                 if current_time - last_allocation_ts >= allocation_interval_sec:
                     weights = orchestrator.decide_strategy_allocation(
@@ -452,7 +540,7 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
             weight_manager.weights = weights
 
             # 4. For each strategy (based on weights) - OPTIMISÉ pour réduire coûts
-            if not budget_exceeded:
+            if not budget_exceeded and not circuit_breaker_tripped:
                 opportunities_processed = 0
                 for strategy_name, strategy_instance in strategies.items():
                     weight = float(getattr(weights, strategy_name, 0.0))
@@ -497,7 +585,7 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                             market_context=context,
                         )
                         # Safety: apply configurable confidence threshold (default 0.6) and clamp leverage conservatively
-                        min_conf = float(getattr(cfg.llm, "min_confidence_to_execute", 0.6))
+                        min_conf = float(dynamic_min_confidence)
                         conf = float(decision.get("confidence", 0.0))
                         direction = str(decision.get("direction", "flat")).lower()
                         size_usd = float(decision.get("size_usd", 0.0) or 0.0)
@@ -543,12 +631,6 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                             except Exception:
                                 pass
                             resp = executor.execute_strategy(strategy_name, decision, weights)
-                            performance_tracker.record_trade_start(
-                                strategy=strategy_name,
-                                entry_price=float(opportunity.get("price", 0.0) or opportunity.get("mid", 0.0) or 0.0),
-                                size=float(size_usd),
-                                symbol=decision["symbol"],
-                            )
                             try:
                                 ok = bool(resp and isinstance(resp, dict) and resp.get("ok"))
                                 if ok:
@@ -556,8 +638,52 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                                     # Also record into monitor storage so it appears under Recent Trades (entry-only snapshot)
                                     if monitor_engine:
                                         try:
+                                            # Prefer actual filled size/price when available from broker response
                                             entry_px = float(decision.get("entry_price", 0.0) or 0.0)
                                             coin_sz = float(size_usd) / entry_px if entry_px > 0 else 0.0
+                                            try:
+                                                resp_root = resp.get("response", {})
+                                                # Structure: {'status':'ok','response':{'type':'order','data':{'statuses':[{'filled':{'totalSz': '0.002','avgPx': '103650.7'}}]}}}
+                                                filled_list = (((resp_root or {}).get("response", {}) or {}).get("data", {}) or {}).get("statuses", [])
+                                                if isinstance(filled_list, list) and filled_list:
+                                                    filled = filled_list[0].get("filled", {}) if isinstance(filled_list[0], dict) else {}
+                                                    f_sz = filled.get("totalSz")
+                                                    f_px = filled.get("avgPx")
+                                                    if f_sz is not None:
+                                                        coin_sz = float(f_sz)
+                                                    if f_px is not None:
+                                                        entry_px = float(f_px)
+                                            except Exception:
+                                                # Fallback to broker-reported request size if present
+                                                try:
+                                                    req = resp.get("request", {}) if isinstance(resp.get("request"), dict) else {}
+                                                    if "sz" in req:
+                                                        coin_sz = float(req.get("sz"))
+                                                except Exception:
+                                                    pass
+                                            # Record start with correct coin size and direction
+                                            try:
+                                                performance_tracker.record_trade_start(
+                                                    strategy=strategy_name,
+                                                    entry_price=float(entry_px if entry_px > 0 else (opportunity.get("price", 0.0) or opportunity.get("mid", 0.0) or 0.0)),
+                                                    size=float(coin_sz),
+                                                    symbol=decision["symbol"],
+                                                    direction=direction,
+                                                )
+                                            except Exception:
+                                                pass
+                                            # Schedule evaluation for learning loop
+                                            try:
+                                                pending_evaluations.append({
+                                                    "strategy": strategy_name,
+                                                    "symbol": decision["symbol"],
+                                                    "direction": direction,
+                                                    "entry_price": float(entry_px if entry_px > 0 else (opportunity.get("price", 0.0) or opportunity.get("mid", 0.0) or 0.0)),
+                                                    "size": float(coin_sz),
+                                                    "ts_open": time.time(),
+                                                })
+                                            except Exception:
+                                                pass
                                             monitor_engine.record_trade(
                                                 timestamp=time.time(),
                                                 strategy=strategy_name,
@@ -598,10 +724,93 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                                 except Exception:
                                     pass
 
-            # 5. Update performance tracking
+            # 5. Online learning: evaluate matured pending trades (PNL proxy) and feed back
+            try:
+                now_ts = time.time()
+                price_map: Dict[str, Dict[str, float]] = context.get("prices", {}) or {}
+                matured: List[Dict[str, Any]] = []
+                remaining: List[Dict[str, Any]] = []
+                for p in pending_evaluations:
+                    if float(now_ts - float(p.get("ts_open", 0.0))) >= float(evaluation_horizon_sec):
+                        matured.append(p)
+                    else:
+                        remaining.append(p)
+                for p in matured:
+                    sym = str(p.get("symbol", "BTC/USD:USD"))
+                    # Best-effort exit price: prefer Hyperliquid quote, else median of venues
+                    exit_price = 0.0
+                    try:
+                        per_ex = price_map.get(sym, {})
+                        if isinstance(per_ex, dict):
+                            hl_px = per_ex.get("hyperliquid")
+                            if hl_px is not None and float(hl_px) > 0:
+                                exit_price = float(hl_px)
+                            else:
+                                vals = [float(v) for v in per_ex.values() if float(v) > 0]
+                                if vals:
+                                    import statistics
+                                    exit_price = float(statistics.median(vals))
+                    except Exception:
+                        exit_price = 0.0
+                    entry_price = float(p.get("entry_price", 0.0))
+                    size_coin = float(p.get("size", 0.0))
+                    direction = str(p.get("direction", "long")).lower()
+                    if entry_price > 0 and exit_price > 0 and size_coin > 0:
+                        gross_pnl = (exit_price - entry_price) * size_coin if direction == "long" else (entry_price - exit_price) * size_coin
+                        # Estimate round-trip fees (entry + exit)
+                        try:
+                            fee_bps = float(getattr(getattr(cfg, "broker", object()), "fee_bps", 0.0))
+                        except Exception:
+                            fee_bps = 0.0
+                        est_fees = ((entry_price + exit_price) * size_coin) * (fee_bps / 10000.0)
+                        pnl = float(gross_pnl - est_fees)
+                        # Record into performance tracker (proxy trade completion)
+                        try:
+                            performance_tracker.track_trade(
+                                strategy=str(p.get("strategy", "unknown")),
+                                entry=float(entry_price),
+                                exit=float(exit_price),
+                                size=float(size_coin),
+                                fees=float(est_fees),
+                            )
+                        except Exception:
+                            pass
+                        # Feed back to orchestrator/weight manager
+                        try:
+                            orchestrator.update_performance(strategy=str(p.get("strategy", "unknown")), pnl=float(pnl))
+                        except Exception:
+                            pass
+                        try:
+                            weight_manager.update_performance(strategy=str(p.get("strategy", "unknown")), pnl=float(pnl))
+                        except Exception:
+                            pass
+                        # Persist realized trade to monitor if available
+                        try:
+                            if monitor_engine:
+                                monitor_engine.record_trade(
+                                    timestamp=now_ts,
+                                    strategy=str(p.get("strategy", "unknown")),
+                                    symbol=sym,
+                                    side="sell" if direction == "long" else "buy",
+                                    size=float(size_coin),
+                                    entry=float(entry_price),
+                                    exit=float(exit_price),
+                                    pnl=float(pnl),
+                                    fees=float(est_fees),
+                                    confidence=None,
+                                    metadata={"evaluation_horizon_sec": evaluation_horizon_sec, "proxy": True},
+                                )
+                        except Exception:
+                            pass
+                pending_evaluations = remaining
+            except Exception:
+                # If learning loop fails, do not impact trading
+                pass
+
+            # 6. Update performance tracking (placeholder hook)
             performance_tracker.update_positions(broker.get_portfolio())
 
-            # 6. Sleep (short sleep chunks to react faster to stop_event), and heartbeat periodically
+            # 7. Sleep (short sleep chunks to react faster to stop_event), and heartbeat periodically
             total_sleep = int(cfg.llm.decision_interval_sec)
             slept = 0.0
             while slept < total_sleep and not (stop_event and stop_event.is_set()):

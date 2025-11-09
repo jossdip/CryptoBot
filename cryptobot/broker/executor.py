@@ -59,14 +59,26 @@ class MultiStrategyExecutor:
             except Exception:
                 pass
             return None
+        # Quantize size using broker helper if available to avoid wire rounding
+        q_coin_size = coin_size
         try:
-            log.info(f"Placing order | strat={strategy_name} sym={symbol} side={side} coin_sz={coin_size:.6f} lev={leverage} usd_sz={size_usd:.2f} entry={entry_price:.2f}")
+            norm_fn = getattr(self.broker, "_normalize_symbol_for_hyperliquid", None)
+            q_fn = getattr(self.broker, "_quantize_size", None)
+            coin_tkr = norm_fn(symbol) if callable(norm_fn) else (symbol.split("/", 1)[0].split(":", 1)[0] if isinstance(symbol, str) else "")
+            if callable(q_fn) and coin_tkr:
+                q_coin_size = float(q_fn(coin_tkr, coin_size))
+                if q_coin_size <= 0.0 and coin_size > 0.0:
+                    q_coin_size = coin_size
+        except Exception:
+            q_coin_size = coin_size
+        try:
+            log.info(f"Placing order | strat={strategy_name} sym={symbol} side={side} coin_sz={q_coin_size:.6f} lev={leverage} usd_sz={size_usd:.2f} entry={entry_price:.2f}")
         except Exception:
             pass
         resp = self.broker.place_order(
             symbol=symbol,
             side=side,
-            size=coin_size,
+            size=q_coin_size,
             leverage=leverage,
             order_type="market",
             price=None,
@@ -75,7 +87,13 @@ class MultiStrategyExecutor:
         )
         try:
             if isinstance(resp, dict) and resp.get("ok"):
-                log.info(f"Order placed | strat={strategy_name} sym={symbol} side={side} coin_sz={coin_size:.6f} lev={leverage}")
+                # Prefer the broker-reported request size for clarity
+                try:
+                    req = resp.get("request", {}) if isinstance(resp.get("request"), dict) else {}
+                    logged_sz = float(req.get("sz", q_coin_size))
+                except Exception:
+                    logged_sz = q_coin_size
+                log.info(f"Order placed | strat={strategy_name} sym={symbol} side={side} coin_sz={logged_sz:.6f} lev={leverage}")
             else:
                 log.error(f"Order failed | strat={strategy_name} sym={symbol} side={side} resp={resp}")
         except Exception:

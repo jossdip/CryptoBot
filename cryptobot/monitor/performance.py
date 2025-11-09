@@ -9,12 +9,13 @@ class PerformanceTracker:
         self.trades: List[Dict[str, Any]] = []
         self._open_trades: Dict[str, Dict[str, Any]] = {}
 
-    def record_trade_start(self, strategy: str, entry_price: float, size: float, symbol: str = "BTC/USD:USD") -> None:
+    def record_trade_start(self, strategy: str, entry_price: float, size: float, symbol: str = "BTC/USD:USD", direction: str = "long") -> None:
         self._open_trades[strategy] = {
             "strategy": strategy,
             "symbol": symbol,
             "entry": float(entry_price),
             "size": float(size),
+            "direction": str(direction).lower(),
             "ts_open": time.time(),
         }
 

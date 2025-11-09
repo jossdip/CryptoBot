@@ -5,6 +5,7 @@ from typing import Dict, Optional, Literal, Any
 
 import os
 import time
+from decimal import Decimal, ROUND_DOWN, getcontext
 
 from loguru import logger as log
 
@@ -102,15 +103,20 @@ class HyperliquidBroker:
         # Address used to sign transactions (API wallet / agent wallet)
         self.account_address = wallet_obj.address
         # Address to query portfolio/state on Hyperliquid (must be the main account address)
-        # If a wallet_address was provided in config/.env, prefer it; otherwise fall back to signer address
-        self.query_address = self.conn.wallet_address or self.account_address
+        # Use signer address if provided address mismatches to avoid ambiguity
+        if self.conn.wallet_address and self.conn.wallet_address.lower() != self.account_address.lower():
+            log.info("Using signer address as query address for consistency with the private key")
+            self.query_address = self.account_address
+        else:
+            # If a wallet_address was provided in config/.env, prefer it; otherwise fall back to signer address
+            self.query_address = self.conn.wallet_address or self.account_address
 
         # Initialize client with wallet object and base_url; pass account_address for clarity
         try:
             self.client = HyperliquidClient(
                 wallet_obj,
                 base_url=self.conn.base_url,
-                account_address=self.query_address,
+                account_address=self.account_address,
             )
         except TypeError:
             # Fallback: without account_address
@@ -160,7 +166,19 @@ class HyperliquidBroker:
             # 1) Preferred for market orders: use market_open with positional args and quantized size
             if order_type == "market" and hasattr(self.client, "market_open"):
                 q_sz = self._quantize_size(hl_symbol, float(size))
-                response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                try:
+                    response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                except Exception as e:
+                    # Retry once if wire rounding complained; reduce by one size step
+                    if "float_to_wire" in str(e) or "rounding" in str(e):
+                        step = self._get_size_step(hl_symbol)
+                        new_q = max(0.0, float(Decimal(str(q_sz)) - Decimal(str(step))))
+                        if new_q > 0.0:
+                            log.debug(f"Retrying market_open with adjusted size due to wire rounding: {q_sz} -> {new_q}")
+                            response = self.client.market_open(hl_symbol, is_buy, float(new_q))  # type: ignore[misc]
+                            q_sz = new_q
+                        else:
+                            raise
                 log.debug(f"Hyperliquid market_open(positional) response: {response}")
                 return {"ok": True, "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz), "type": "market"}, "response": response, "ts": time.time()}
 
@@ -171,7 +189,18 @@ class HyperliquidBroker:
                 q_sz = self._quantize_size(hl_symbol, float(size))
                 limit_px = float(price)
                 if hasattr(self.client, "order"):
-                    response = self.client.order(hl_symbol, is_buy, float(q_sz), limit_px)  # type: ignore[misc]
+                    try:
+                        response = self.client.order(hl_symbol, is_buy, float(q_sz), limit_px)  # type: ignore[misc]
+                    except Exception as e:
+                        if "float_to_wire" in str(e) or "rounding" in str(e):
+                            step = self._get_size_step(hl_symbol)
+                            new_q = max(0.0, float(Decimal(str(q_sz)) - Decimal(str(step))))
+                            if new_q > 0.0:
+                                log.debug(f"Retrying limit order with adjusted size due to wire rounding: {q_sz} -> {new_q}")
+                                response = self.client.order(hl_symbol, is_buy, float(new_q), limit_px)  # type: ignore[misc]
+                                q_sz = new_q
+                            else:
+                                raise
                     log.debug(f"Hyperliquid order(positional, limit) response: {response}")
                     return {"ok": True, "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz), "limit_px": limit_px, "type": "limit"}, "response": response, "ts": time.time()}
                 # Fallback: place a market order if limit path not available
@@ -278,20 +307,22 @@ class HyperliquidBroker:
         Quantize the size down to the allowed increment to avoid wire rounding errors.
         """
         try:
-            step = max(1e-12, float(self._get_size_step(coin)))
-            if size <= 0 or step <= 0:
+            step = max(Decimal("1e-12"), Decimal(str(self._get_size_step(coin))))
+            if float(size) <= 0 or step <= 0:
                 return 0.0
-            # floor to increment
-            units = int(float(size) / step)
-            q = float(units) * step
-            if q <= 0.0 and size > 0.0:
+            getcontext().prec = max(getcontext().prec, 28)
+            sz = Decimal(str(size))
+            q = sz.quantize(step, rounding=ROUND_DOWN)
+            if q <= 0 and sz > 0:
                 q = step
-            # Guard against excessive float precision
-            # Round to nearest 12 decimals to keep wire clean
-            return float(f"{q:.12f}")
+            # Limit to 12 decimals on wire
+            return float(Decimal(q).quantize(Decimal("1e-12"), rounding=ROUND_DOWN))
         except Exception:
             # Last resort: return original size with limited precision
-            return float(f"{float(size):.12f}")
+            try:
+                return float(Decimal(str(size)).quantize(Decimal("1e-12"), rounding=ROUND_DOWN))
+            except Exception:
+                return float(f"{float(size):.12f}")
 
     def _normalize_user_state(self, data: Any) -> Dict[str, Any]:
         """Best-effort normalization of Info.user_state payload into a common schema.
