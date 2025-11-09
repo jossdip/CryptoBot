@@ -144,6 +144,9 @@ class InteractiveShell:
             if cmd == "trades" or cmd == "t":
                 self._cmd_trades(args)
                 continue
+            if cmd == "positions" or cmd == "pos":
+                self._cmd_positions()
+                continue
             if cmd == "portfolio" or cmd == "port":
                 self._cmd_portfolio()
                 continue
@@ -152,6 +155,9 @@ class InteractiveShell:
                 continue
             if cmd == "strategies" or cmd == "strats":
                 self._cmd_strategies()
+                continue
+            if cmd == "weights" or cmd == "w":
+                self._cmd_weights()
                 continue
             if cmd == "risk":
                 self._cmd_risk()
@@ -197,7 +203,7 @@ class InteractiveShell:
 
     def _print_help(self) -> None:
         self.console.print(
-            "Commands: start, stop [--force], restart [--force], pause, resume, status, monitor, trades, positions, flatten, performance, portfolio, strategies, weights, risk, config, logs, help, exit, clear, version"
+            "Commands: start, stop [--force], restart [--force], pause, resume, status, ps/pids, enforce, monitor, trades, positions, flatten, performance, portfolio, strategies, weights, risk, config, logs, help, exit, clear, version"
         )
 
     def _trading_target(self) -> None:
@@ -582,6 +588,21 @@ class InteractiveShell:
         for name, w in weights.items():
             self.console.print(f"{name}: {float(w)*100:.1f}%")
 
+    def _cmd_weights(self) -> None:
+        # Show latest runtime weights from storage if present; else show configured initial weights
+        try:
+            storage = self._get_storage()
+            latest = storage.latest_weights()
+            if latest:
+                self.console.print("Runtime Weights:")
+                for k in ("market_making","momentum","scalping","arbitrage","breakout","sniping"):
+                    v = float(latest.get(k, 0.0))
+                    self.console.print(f"- {k}: {v:.2f}")
+                return
+        except Exception:
+            pass
+        # Fallback to configured
+        self._cmd_strategies()
     def _cmd_risk(self) -> None:
         cfg = self.context.get("config")
         if not cfg:
