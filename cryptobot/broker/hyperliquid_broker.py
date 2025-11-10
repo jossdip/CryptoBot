@@ -266,15 +266,12 @@ class HyperliquidBroker:
                     # Preferred: positional dict order_type (market)
                     response = self.client.order(hl_symbol, is_buy, float(q_sz), {"market": {}}, False, None, "Gtc")  # type: ignore[misc]
                 except TypeError as e:
-                    if "order_type" in str(e):
-                        # Try including order_type='market'
-                        try:
-                            response = self.client.order(hl_symbol, is_buy, float(q_sz), "market")  # type: ignore[misc]
-                        except TypeError:
-                            response = self.client.order(hl_symbol, is_buy, float(q_sz), order_type="market")  # type: ignore[misc]
-                    else:
-                        # Legacy: order(coin, is_buy, sz)
-                        response = self.client.order(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                    # Be explicit: always include order_type to satisfy SDKs that require it
+                    try:
+                        response = self.client.order(hl_symbol, is_buy, float(q_sz), "market")  # type: ignore[misc]
+                    except TypeError:
+                        # Try keyword form
+                        response = self.client.order(hl_symbol, is_buy, float(q_sz), order_type="market")  # type: ignore[misc]
                 except Exception as e:
                     if "indices must be integers" in str(e):
                         # Try simple positional dict and legacy variants
@@ -291,8 +288,8 @@ class HyperliquidBroker:
                             except Exception:
                                 continue
                         if not tried_ok:
-                            # Last resort legacy: order(coin, is_buy, sz)
-                            response = self.client.order(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                            # Final attempt with keyword to satisfy strict signatures
+                            response = self.client.order(hl_symbol, is_buy, float(q_sz), order_type="market")  # type: ignore[misc]
                     else:
                         raise
                 log.debug(f"Hyperliquid order(positional, market) response: {response}")
