@@ -197,10 +197,8 @@ class HyperliquidBroker:
                 if hasattr(self.client, "order"):
                     response = None
                     try:
-                        # Preferred: keyword 'order_type' dict (limit)
-                        response = self.client.order(
-                            hl_symbol, is_buy, float(q_sz), order_type={"limit": {"px": float(limit_px), "tif": "Gtc"}}
-                        )  # type: ignore[misc]
+                        # Preferred: positional dict order_type (limit)
+                        response = self.client.order(hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px)}}, False, None, "Gtc")  # type: ignore[misc]
                     except TypeError as e:
                         # Alternate signature requires order_type
                         if "order_type" in str(e):
@@ -220,10 +218,8 @@ class HyperliquidBroker:
                             if new_q > 0.0:
                                 log.debug(f"Retrying limit order with adjusted size due to wire rounding: {q_sz} -> {new_q}")
                                 try:
-                                    # Retry with keyword 'order_type' dict (limit)
-                                    response = self.client.order(
-                                        hl_symbol, is_buy, float(new_q), order_type={"limit": {"px": float(limit_px), "tif": "Gtc"}}
-                                    )  # type: ignore[misc]
+                                    # Retry with positional dict order_type (limit)
+                                    response = self.client.order(hl_symbol, is_buy, float(new_q), {"limit": {"px": float(limit_px)}}, False, None, "Gtc")  # type: ignore[misc]
                                 except TypeError as e2:
                                     if "order_type" in str(e2):
                                         try:
@@ -237,17 +233,22 @@ class HyperliquidBroker:
                             else:
                                 raise
                         elif "indices must be integers" in str(e):
-                            # Try simple alternatives (positional dict, camelCase keyword, legacy signatures)
-                            try:
-                                response = self.client.order(hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px), "tif": "Gtc"}})  # type: ignore[misc]
-                            except Exception:
+                            # Try simple positional dict variants and legacy signatures
+                            tried_ok = False
+                            for args in [
+                                (hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px)}}, False, None, "Gtc"),
+                                (hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px)}}),
+                                (hl_symbol, is_buy, float(q_sz), float(limit_px), "limit"),
+                                (hl_symbol, is_buy, float(q_sz), float(limit_px)),
+                            ]:
                                 try:
-                                    response = self.client.order(hl_symbol, is_buy, float(q_sz), orderType={"limit": {"px": float(limit_px), "tif": "Gtc"}})  # type: ignore[misc]
+                                    response = self.client.order(*args)  # type: ignore[misc]
+                                    tried_ok = True
+                                    break
                                 except Exception:
-                                    try:
-                                        response = self.client.order(hl_symbol, is_buy, float(q_sz), float(limit_px), "limit")  # type: ignore[misc]
-                                    except Exception:
-                                        response = self.client.order(hl_symbol, is_buy, float(q_sz), float(limit_px), order_type="limit")  # type: ignore[misc]
+                                    continue
+                            if not tried_ok:
+                                raise
                     else:
                         raise
                     if response is not None:
@@ -262,8 +263,8 @@ class HyperliquidBroker:
                 q_sz = self._quantize_size(hl_symbol, float(size))
                 response = None
                 try:
-                    # Preferred: keyword 'order_type' dict (market)
-                    response = self.client.order(hl_symbol, is_buy, float(q_sz), order_type={"market": {}})  # type: ignore[misc]
+                    # Preferred: positional dict order_type (market)
+                    response = self.client.order(hl_symbol, is_buy, float(q_sz), {"market": {}}, False, None, "Gtc")  # type: ignore[misc]
                 except TypeError as e:
                     if "order_type" in str(e):
                         # Try including order_type='market'
@@ -276,14 +277,22 @@ class HyperliquidBroker:
                         response = self.client.order(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
                 except Exception as e:
                     if "indices must be integers" in str(e):
-                        # Try positional dict; then camelCase keyword; then legacy
-                        try:
-                            response = self.client.order(hl_symbol, is_buy, float(q_sz), {"market": {}})  # type: ignore[misc]
-                        except Exception:
+                        # Try simple positional dict and legacy variants
+                        tried_ok = False
+                        for args in [
+                            (hl_symbol, is_buy, float(q_sz), {"market": {}}, False, None, "Gtc"),
+                            (hl_symbol, is_buy, float(q_sz), {"market": {}}),
+                            (hl_symbol, is_buy, float(q_sz), "market"),
+                        ]:
                             try:
-                                response = self.client.order(hl_symbol, is_buy, float(q_sz), orderType={"market": {}})  # type: ignore[misc]
+                                response = self.client.order(*args)  # type: ignore[misc]
+                                tried_ok = True
+                                break
                             except Exception:
-                                response = self.client.order(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                                continue
+                        if not tried_ok:
+                            # Last resort legacy: order(coin, is_buy, sz)
+                            response = self.client.order(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
                     else:
                         raise
                 log.debug(f"Hyperliquid order(positional, market) response: {response}")
