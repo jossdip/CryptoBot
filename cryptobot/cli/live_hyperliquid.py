@@ -393,6 +393,22 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
     # Active local brackets: symbol -> dict(tp_pct, sl_pct, trailing_pct, entry_price, direction)
     active_brackets: Dict[str, Dict[str, float]] = {}
     last_bracket_check_ts = 0.0
+    # Track open timestamps per symbol to enforce a minimum hold time before LLM-driven exits
+    open_ts_by_symbol: Dict[str, float] = {}
+    # LLM-decided runtime parameters (initialized with safe defaults)
+    runtime_params: Dict[str, Any] = {
+        "market_making": {
+            "edge_margin_bps": 2.0,
+            "k_vol": 1.0,
+            "passive_order_fraction_of_alloc": 0.02,
+            "passive_order_usd_cap": 250.0,
+            "passive_order_min_usd": 10.0,
+        },
+        "risk": {
+            "min_hold_seconds": 20.0,
+        },
+    }
+    last_params_ts = 0.0
     while not (stop_event and stop_event.is_set()):
         try:
             # Honor remote stop requests (from shell/systemd)
@@ -485,6 +501,35 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
 
             # 2. LLM decides strategy weights (optimisé: moins fréquent)
             current_time = time.time()
+            # 2a. LLM decides runtime parameters (PNL-first knobs), at a similar cadence to allocation
+            try:
+                params_interval_sec = float(getattr(getattr(cfg, "llm", object()), "params_interval_sec", allocation_interval_sec))
+            except Exception:
+                params_interval_sec = allocation_interval_sec
+            if not budget_exceeded and not circuit_breaker_tripped and (current_time - last_params_ts >= params_interval_sec):
+                try:
+                    rp = orchestrator.decide_runtime_parameters(
+                        market_data=context["market"],
+                        portfolio_state=context["portfolio"],
+                        performance_metrics=performance_tracker.feed_to_llm(),
+                    )
+                    if isinstance(rp, dict):
+                        runtime_params = rp
+                        last_params_ts = current_time
+                        try:
+                            log.info(
+                                "LLM runtime params updated: "
+                                f"edge_margin_bps={float(runtime_params['market_making']['edge_margin_bps']):.2f}, "
+                                f"k_vol={float(runtime_params['market_making']['k_vol']):.2f}, "
+                                f"mm_frac={float(runtime_params['market_making']['passive_order_fraction_of_alloc']):.3f}, "
+                                f"mm_cap={float(runtime_params['market_making']['passive_order_usd_cap']):.2f}, "
+                                f"mm_min={float(runtime_params['market_making']['passive_order_min_usd']):.2f}, "
+                                f"min_hold={float(runtime_params['risk']['min_hold_seconds']):.1f}s"
+                            )
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             if budget_exceeded or circuit_breaker_tripped:
                 # Pas d'appels LLM — utiliser fallback adaptatif si activé, sinon réutiliser poids précédents
                 if adaptive_fallback_enabled and (current_time - last_allocation_ts >= allocation_interval_sec):
@@ -725,6 +770,33 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                                                 confidence=conf,
                                                 metadata={"llm_decision": decision, "resp": resp},
                                             )
+                                            # Track open time to enforce min hold before LLM exits
+                                            try:
+                                                open_ts_by_symbol[decision["symbol"]] = float(time.time())
+                                            except Exception:
+                                                pass
+                                            # Place on-exchange bracket orders (best-effort)
+                                            try:
+                                                tp_pct = float(decision.get("take_profit_pct") or 0.0)
+                                                sl_pct = float(decision.get("stop_loss_pct") or 0.0)
+                                                if (tp_pct and tp_pct > 0.0) or (sl_pct and sl_pct > 0.0):
+                                                    br = broker.place_bracket_orders(
+                                                        symbol=decision["symbol"],
+                                                        direction=("long" if direction == "long" else "short"),
+                                                        size=float(coin_sz),
+                                                        entry_price=float(entry_px),
+                                                        tp_pct=(tp_pct if tp_pct > 0.0 else None),
+                                                        sl_pct=(sl_pct if sl_pct > 0.0 else None),
+                                                    )
+                                                    try:
+                                                        if br.get("ok"):
+                                                            log.info(f"On-exchange bracket placed | sym={decision['symbol']} tp={(tp_pct*100.0):.2f}% sl={(sl_pct*100.0):.2f}%")
+                                                        else:
+                                                            log.warning(f"Bracket placement partial/failed | sym={decision['symbol']} details={br}")
+                                                    except Exception:
+                                                        pass
+                                            except Exception:
+                                                pass
                                         except Exception:
                                             pass
                                 else:
@@ -739,12 +811,35 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                                     mid = float(opportunity.get("mid", 0.0))
                                     spr = float(opportunity.get("spread", 0.0))
                                     vol = float(context.get("volatility", {}).get(sym, 0.01))
-                                    # Safe condition: valid mid and modest spread vs volatility
-                                    if mid > 0.0 and spr > 0.0 and vol > 0.0 and spr <= max(0.002, 3.0 * vol):
-                                        strategy_instance.place_maker_orders(symbol=sym, mid_price=mid, spread=spr)
-                                        log.info(f"Placed passive maker orders for {sym} | mid={mid:.2f} | spread={spr:.4f}")
+                                    # Net-edge gate: require spread >= 2*fee + margin + k*vol
+                                    try:
+                                        fee_bps = float(getattr(getattr(cfg, "broker", object()), "fee_bps", 0.0))
+                                    except Exception:
+                                        fee_bps = 0.0
+                                    # Pull knobs from LLM-decided runtime params
+                                    try:
+                                        edge_margin_bps = float(runtime_params["market_making"]["edge_margin_bps"])
+                                        k_vol = float(runtime_params["market_making"]["k_vol"])
+                                        passive_frac = float(runtime_params["market_making"]["passive_order_fraction_of_alloc"])
+                                        passive_cap_usd = float(runtime_params["market_making"]["passive_order_usd_cap"])
+                                        min_usd = float(runtime_params["market_making"]["passive_order_min_usd"])
+                                    except Exception:
+                                        edge_margin_bps, k_vol, passive_frac, passive_cap_usd, min_usd = 2.0, 1.0, 0.02, 250.0, 10.0
+                                    min_required_spread = (2.0 * fee_bps / 10000.0) + (edge_margin_bps / 10000.0) + (k_vol * max(0.0, vol))
+                                    if mid > 0.0 and spr >= min_required_spread:
+                                        # Size maker orders by allocation
+                                        try:
+                                            alloc = float(executor.total_capital) * float(getattr(weights, "market_making", 0.0))
+                                        except Exception:
+                                            alloc = 0.0
+                                        size_usd = min(max(min_usd, alloc * passive_frac), passive_cap_usd)
+                                        if size_usd > 0.0:
+                                            strategy_instance.place_maker_orders(symbol=sym, mid_price=mid, spread=spr, size_usd=size_usd, post_only=True)
+                                            log.info(f"Placed passive maker orders for {sym} | mid={mid:.2f} | spread={spr:.4f} | size_usd~{size_usd:.2f}")
+                                        else:
+                                            log.debug(f"Skipped passive maker orders (no alloc) | alloc=0 sym={sym}")
                                     else:
-                                        log.debug(f"Skipped passive maker orders | mid={mid:.2f} spr={spr:.5f} vol={vol:.5f} sym={sym}")
+                                        log.debug(f"Skipped passive maker orders | mid={mid:.2f} spr={spr:.5f} min_req={min_required_spread:.5f} vol={vol:.5f} sym={sym}")
                                 except Exception:
                                     pass
                             else:
@@ -808,6 +903,35 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                         pm_close = bool(pm_decision.get("close", False))
                         # Use the same dynamic threshold as entries
                         if pm_close and pm_conf >= float(dynamic_min_confidence):
+                            # Enforce minimum hold time and PnL-positive gating before LLM-driven exits
+                            now = time.time()
+                            # Use LLM-decided min hold seconds
+                            try:
+                                min_hold_sec = float(runtime_params["risk"]["min_hold_seconds"])
+                            except Exception:
+                                min_hold_sec = 20.0
+                            opened_at = float(open_ts_by_symbol.get(full_symbol, 0.0))
+                            hold_ok = True if opened_at <= 0.0 else ((now - opened_at) >= min_hold_sec)
+                            # Estimate net PnL after fees
+                            entry_px = float(p.get("avg_price", 0.0))
+                            abs_qty = abs(qty)
+                            long_pos = qty > 0.0
+                            gross = ((cur_px - entry_px) * abs_qty) if long_pos else ((entry_px - cur_px) * abs_qty)
+                            try:
+                                fee_bps = float(getattr(getattr(cfg, "broker", object()), "fee_bps", 0.0))
+                            except Exception:
+                                fee_bps = 0.0
+                            est_fees = ((entry_px + cur_px) * abs_qty) * (fee_bps / 10000.0) if entry_px > 0.0 and cur_px > 0.0 else 0.0
+                            net = float(gross - est_fees)
+                            reason_txt = str(pm_decision.get("reasoning", "") or "").lower()
+                            invalidation = ("invalid" in reason_txt) or ("break" in reason_txt and "trend" in reason_txt)
+                            allow_close = hold_ok and (net > 0.0 or invalidation)
+                            if not allow_close:
+                                try:
+                                    log.debug(f"Skip LLM exit | sym={full_symbol} hold_ok={hold_ok} net={net:.6f} conf={pm_conf:.2f}")
+                                except Exception:
+                                    pass
+                                continue
                             size_pct = float(pm_decision.get("size_pct", 1.0))
                             order_type = str(pm_decision.get("order_type", "market")).lower()
                             limit_off = float(pm_decision.get("limit_offset_pct", 0.0005))

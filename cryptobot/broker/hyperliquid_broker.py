@@ -360,6 +360,88 @@ class HyperliquidBroker:
         # Final cleanup: keep only alphanumerics (HL tickers are uppercase coin names)
         return "".join(ch for ch in base if ch.isalnum())
 
+    def place_bracket_orders(
+        self,
+        *,
+        symbol: str,
+        direction: Literal["long", "short"],
+        size: float,
+        entry_price: float,
+        tp_pct: Optional[float],
+        sl_pct: Optional[float],
+    ) -> Dict[str, Any]:
+        """
+        Best-effort bracket: place a reduce-only take-profit limit and (if possible) a stop trigger.
+        Returns a summary with ok flag and child responses.
+        """
+        summary: Dict[str, Any] = {"ok": True, "tp": None, "sl": None}
+        try:
+            hl_symbol = self._normalize_symbol_for_hyperliquid(symbol)
+            q_sz = self._quantize_size(hl_symbol, float(size))
+            if q_sz <= 0.0 or entry_price <= 0.0:
+                return {"ok": False, "error": "invalid size or entry price"}
+            is_long = direction.lower() == "long"
+            # 1) TP as reduce-only limit
+            if tp_pct and tp_pct > 0.0:
+                try:
+                    tp_px_raw = entry_price * (1.0 + (tp_pct if is_long else -tp_pct))
+                    tp_px = self._quantize_price(hl_symbol, "sell" if is_long else "buy", float(tp_px_raw))
+                    response = None
+                    if hasattr(self.client, "order"):
+                        try:
+                            if HlOrderType is not None:
+                                # Attempt enum signature; 6th arg interpreted as reduce_only/post_only on some SDKs
+                                response = self.client.order(hl_symbol, (not is_long), float(q_sz), float(tp_px), HlOrderType.Limit, True, None, None)  # type: ignore[misc]
+                            else:
+                                # Dict-based fallback; include reduceOnly when supported
+                                try:
+                                    response = self.client.order(hl_symbol, (not is_long), float(q_sz), {"limit": {"px": float(tp_px)}}, True)  # type: ignore[misc]
+                                except TypeError:
+                                    response = self.client.order(hl_symbol, (not is_long), float(q_sz), {"limit": {"px": float(tp_px)}})  # type: ignore[misc]
+                        except TypeError:
+                            # Retry minimal variants
+                            if HlOrderType is not None:
+                                try:
+                                    response = self.client.order(hl_symbol, (not is_long), float(q_sz), float(tp_px), HlOrderType.Limit)  # type: ignore[misc]
+                                except Exception:
+                                    response = None
+                    summary["tp"] = response
+                except Exception as e:
+                    summary["ok"] = False
+                    summary["tp_error"] = str(e)
+            # 2) SL as reduce-only trigger (best-effort; SDK variations)
+            if sl_pct and sl_pct > 0.0:
+                try:
+                    sl_trigger_px = entry_price * (1.0 - (sl_pct if is_long else -sl_pct))
+                    # Prefer dict-based trigger API if available; else skip
+                    response = None
+                    if hasattr(self.client, "order"):
+                        try:
+                            # Old SDKs accept a 'trigger' payload
+                            trigger_payload = {"trigger": {"px": float(sl_trigger_px), "isMarket": True}, "reduceOnly": True}
+                            response = self.client.order(hl_symbol, (not is_long), float(q_sz), trigger_payload)  # type: ignore[misc]
+                        except TypeError:
+                            # Some SDKs expect a slightly different shape
+                            try:
+                                trigger_payload = {"trigger": {"triggerPx": float(sl_trigger_px), "isMarket": True}, "reduceOnly": True}
+                                response = self.client.order(hl_symbol, (not is_long), float(q_sz), trigger_payload)  # type: ignore[misc]
+                            except Exception:
+                                response = None
+                    if response is None:
+                        # If we cannot place a native stop, degrade gracefully by placing a far-out limit as last resort
+                        # Note: local bracket manager remains active as a safety net.
+                        side = "sell" if is_long else "buy"
+                        limit_px = self._quantize_price(hl_symbol, side, float(sl_trigger_px))
+                        response = self.client.order(hl_symbol, (not is_long), float(q_sz), {"limit": {"px": float(limit_px)}}, True)  # type: ignore[misc]
+                    summary["sl"] = response
+                except Exception as e:
+                    # Keep summary ok but record error; local bracket manager will still protect
+                    summary["ok"] = summary["ok"] and False
+                    summary["sl_error"] = str(e)
+            return summary
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     def _get_size_step(self, coin: str) -> float:
         """
         Best-effort retrieval of size step (minimum increment) for a coin.

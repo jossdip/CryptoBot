@@ -186,3 +186,32 @@ BRACKET RULES:
 - tp_pct in [0.002, 0.02]; sl_pct in [0.003, 0.02]; trailing_pct in [0.0, 0.02]
 """
 
+
+RUNTIME_PARAMS_PROMPT_TEMPLATE = """
+You are optimizing LIVE runtime parameters to maximize PnL while minimizing risk and costs.
+
+Context:
+- Market data: {market_data}
+- Portfolio state: {portfolio_state}
+- Performance metrics: {performance_metrics}
+
+Tune ONLY these parameters (return numeric values within safe ranges):
+{{
+  "market_making": {{
+    "edge_margin_bps": 0.5..10.0,               // extra bps over 2*fees to require for maker fallback
+    "k_vol": 0.0..3.0,                           // multiplier on volatility added to required spread
+    "passive_order_fraction_of_alloc": 0.0..0.2, // fraction of MM allocation per passive order
+    "passive_order_usd_cap": 0..2000,            // per-side USD cap for passive orders
+    "passive_order_min_usd": 0..250              // minimum per-side USD for passive orders
+  }},
+  "risk": {{
+    "min_hold_seconds": 5..120                   // min hold before LLM exits unless clear invalidation
+  }}
+}}
+
+Constraints and objectives:
+- PNL-first: Require sufficient net edge after fees and noise. Increase edge_margin_bps and/or k_vol when market is choppy.
+- Liquidity-aware: Scale passive_order_fraction_of_alloc and caps with liquidity/volatility.
+- Risk control: Increase min_hold_seconds when noise is high; decrease when momentum is clean.
+- Output STRICT JSON with numbers only (no strings), all fields present.
+"""

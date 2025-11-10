@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from cryptobot.llm.client import LLMClient
-from cryptobot.llm.prompts import ALLOCATION_PROMPT_TEMPLATE, TRADE_PROMPT_TEMPLATE, POSITION_PROMPT_TEMPLATE
+from cryptobot.llm.prompts import ALLOCATION_PROMPT_TEMPLATE, TRADE_PROMPT_TEMPLATE, POSITION_PROMPT_TEMPLATE, RUNTIME_PARAMS_PROMPT_TEMPLATE
 from cryptobot.core.logging import get_llm_logger
 
 
@@ -39,6 +39,8 @@ class LLMOrchestrator:
         self.performance_history: List[Dict[str, Any]] = []
         # Optional sink to record decisions (set by monitor/interactive layer)
         self._decision_sink: Optional[Callable[[Dict[str, Any]], None]] = None
+        # Last runtime parameters decided by LLM (optional)
+        self._runtime_params: Dict[str, Any] = {}
 
     def set_decision_sink(self, sink: Optional[Callable[[Dict[str, Any]], None]]) -> None:
         self._decision_sink = sink
@@ -335,5 +337,107 @@ class LLMOrchestrator:
         except Exception:
             pass
         return decision
+
+    # Runtime parameter tuning (LLM-controlled)
+    def _build_params_prompt(self, *, market_data: Dict[str, Any], portfolio_state: Dict[str, Any], performance_metrics: Dict[str, Any]) -> str:
+        return RUNTIME_PARAMS_PROMPT_TEMPLATE.format(
+            market_data=market_data,
+            portfolio_state=portfolio_state,
+            performance_metrics=performance_metrics,
+        )
+
+    def _parse_runtime_params(self, llm_response: Dict[str, Any]) -> Dict[str, Any]:
+        # Defensive extraction and clamping
+        out = {
+            "market_making": {
+                "edge_margin_bps": 2.0,
+                "k_vol": 1.0,
+                "passive_order_fraction_of_alloc": 0.02,
+                "passive_order_usd_cap": 250.0,
+                "passive_order_min_usd": 10.0,
+            },
+            "risk": {
+                "min_hold_seconds": 20.0,
+            },
+        }
+        try:
+            mm = llm_response.get("market_making", {}) if isinstance(llm_response, dict) else {}
+            rk = llm_response.get("risk", {}) if isinstance(llm_response, dict) else {}
+            def clamp(v, lo, hi, dv):
+                try:
+                    x = float(v)
+                    if x != x:  # NaN
+                        return dv
+                    return max(lo, min(hi, x))
+                except Exception:
+                    return dv
+            out["market_making"]["edge_margin_bps"] = clamp(mm.get("edge_margin_bps"), 0.5, 10.0, out["market_making"]["edge_margin_bps"])
+            out["market_making"]["k_vol"] = clamp(mm.get("k_vol"), 0.0, 3.0, out["market_making"]["k_vol"])
+            out["market_making"]["passive_order_fraction_of_alloc"] = clamp(mm.get("passive_order_fraction_of_alloc"), 0.0, 0.2, out["market_making"]["passive_order_fraction_of_alloc"])
+            out["market_making"]["passive_order_usd_cap"] = clamp(mm.get("passive_order_usd_cap"), 0.0, 2000.0, out["market_making"]["passive_order_usd_cap"])
+            out["market_making"]["passive_order_min_usd"] = clamp(mm.get("passive_order_min_usd"), 0.0, 250.0, out["market_making"]["passive_order_min_usd"])
+            out["risk"]["min_hold_seconds"] = clamp(rk.get("min_hold_seconds"), 5.0, 120.0, out["risk"]["min_hold_seconds"])
+        except Exception:
+            pass
+        return out
+
+    def decide_runtime_parameters(
+        self,
+        *,
+        market_data: Dict[str, Any],
+        portfolio_state: Dict[str, Any],
+        performance_metrics: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        ctx = {
+            "market": market_data,
+            "portfolio": portfolio_state,
+            "performance": performance_metrics,
+        }
+        get_llm_logger().debug({
+            "event": "orchestrator_build_prompt",
+            "type": "params",
+            "context_keys": list(ctx.keys()),
+        })
+        prompt = self._build_params_prompt(
+            market_data=market_data,
+            portfolio_state=portfolio_state,
+            performance_metrics=performance_metrics,
+        )
+        response = self.llm.call(prompt=prompt, json_mode=True)
+        params = self._parse_runtime_params(response)
+        self._runtime_params = params
+        get_llm_logger().debug({
+            "event": "orchestrator_decision",
+            "type": "params",
+            "params": params,
+        })
+        # Sink (optional)
+        try:
+            from time import time as _time
+            from json import dumps as _dumps
+            from cryptobot.monitor.insights import build_decision as _build_decision
+            if self._decision_sink:
+                d = _build_decision(
+                    timestamp=_time(),
+                    decision_type="params",
+                    prompt=prompt,
+                    raw_response=response if isinstance(response, dict) else _dumps(response),
+                    metadata={"type": "runtime_params"},
+                )
+                self._decision_sink(
+                    {
+                        "timestamp": d.timestamp,
+                        "decision_type": d.decision_type,
+                        "prompt": d.prompt,
+                        "response": d.response,
+                        "reasoning": d.reasoning,
+                        "sentiment": d.sentiment,
+                        "confidence": d.confidence,
+                        "metadata": d.metadata,
+                    }
+                )
+        except Exception:
+            pass
+        return params
 
 
