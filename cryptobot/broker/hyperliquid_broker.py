@@ -209,25 +209,15 @@ class HyperliquidBroker:
                 if hasattr(self.client, "order"):
                     response = None
                     try:
-                        # Preferred: positional dict order_type (limit)
-                        response = self.client.order(hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px)}}, False, None, "Gtc")  # type: ignore[misc]
+                        # Preferred: minimal dict-based order_type (limit)
+                        response = self.client.order(hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px)}})  # type: ignore[misc]
                     except TypeError as e:
-                        # Alternate signature requires order_type
-                        if "order_type" in str(e):
-                            try:
-                                # Try appending positional order_type
-                                response = self.client.order(hl_symbol, is_buy, float(q_sz), limit_px, "limit")  # type: ignore[misc]
-                            except TypeError:
-                                # Try keyword order_type
-                                response = self.client.order(hl_symbol, is_buy, float(q_sz), limit_px, order_type="limit")  # type: ignore[misc]
-                        else:
-                            # Avoid legacy 4-arg call which omits order_type and fails on newer SDKs
-                            # Retry with explicit dict-only variant (some SDKs require fewer trailing args)
-                            try:
-                                response = self.client.order(hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px)}})  # type: ignore[misc]
-                            except TypeError:
-                                # Last attempt: positional price then explicit order_type
-                                response = self.client.order(hl_symbol, is_buy, float(q_sz), float(limit_px), "limit")  # type: ignore[misc]
+                        # Try variant with explicit reduce_only positional flag
+                        try:
+                            response = self.client.order(hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px)}}, False)  # type: ignore[misc]
+                        except TypeError:
+                            # Try with additional placeholders (older SDKs)
+                            response = self.client.order(hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px)}}, False, None, "Gtc")  # type: ignore[misc]
                     except Exception as e:
                         if "float_to_wire" in str(e) or "rounding" in str(e):
                             step = self._get_size_step(hl_symbol)
@@ -235,17 +225,14 @@ class HyperliquidBroker:
                             if new_q > 0.0:
                                 log.debug(f"Retrying limit order with adjusted size due to wire rounding: {q_sz} -> {new_q}")
                                 try:
-                                    # Retry with positional dict order_type (limit)
-                                    response = self.client.order(hl_symbol, is_buy, float(new_q), {"limit": {"px": float(limit_px)}}, False, None, "Gtc")  # type: ignore[misc]
+                                    # Retry with minimal dict-based order_type (limit)
+                                    response = self.client.order(hl_symbol, is_buy, float(new_q), {"limit": {"px": float(limit_px)}})  # type: ignore[misc]
                                 except TypeError as e2:
-                                    if "order_type" in str(e2):
-                                        try:
-                                            response = self.client.order(hl_symbol, is_buy, float(new_q), limit_px, "limit")  # type: ignore[misc]
-                                        except TypeError:
-                                            response = self.client.order(hl_symbol, is_buy, float(new_q), limit_px, order_type="limit")  # type: ignore[misc]
-                                    else:
-                                        # Final fallback: dict-only variant
+                                    try:
                                         response = self.client.order(hl_symbol, is_buy, float(new_q), {"limit": {"px": float(limit_px)}})  # type: ignore[misc]
+                                    except TypeError:
+                                        # Last attempt with reduce_only flag
+                                        response = self.client.order(hl_symbol, is_buy, float(new_q), {"limit": {"px": float(limit_px)}}, False)  # type: ignore[misc]
                                 q_sz = new_q
                             else:
                                 raise
@@ -253,9 +240,8 @@ class HyperliquidBroker:
                             # Try simple positional dict variants and legacy signatures
                             tried_ok = False
                             for args in [
-                                (hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px)}}, False, None, "Gtc"),
                                 (hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px)}}),
-                                (hl_symbol, is_buy, float(q_sz), float(limit_px), "limit"),
+                                (hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px)}}, False),
                             ]:
                                 try:
                                     response = self.client.order(*args)  # type: ignore[misc]
@@ -279,23 +265,22 @@ class HyperliquidBroker:
                 q_sz = self._quantize_size(hl_symbol, float(size))
                 response = None
                 try:
-                    # Preferred: positional dict order_type (market)
-                    response = self.client.order(hl_symbol, is_buy, float(q_sz), {"market": {}}, False, None, "Gtc")  # type: ignore[misc]
+                    # Preferred: minimal dict-based order_type (market)
+                    response = self.client.order(hl_symbol, is_buy, float(q_sz), {"market": {}})  # type: ignore[misc]
                 except TypeError as e:
-                    # Be explicit: always include order_type to satisfy SDKs that require it
+                    # Try variant with explicit reduce_only positional flag
                     try:
-                        response = self.client.order(hl_symbol, is_buy, float(q_sz), "market")  # type: ignore[misc]
+                        response = self.client.order(hl_symbol, is_buy, float(q_sz), {"market": {}}, False)  # type: ignore[misc]
                     except TypeError:
-                        # Try keyword form
-                        response = self.client.order(hl_symbol, is_buy, float(q_sz), order_type="market")  # type: ignore[misc]
+                        # Try with additional placeholders (older SDKs)
+                        response = self.client.order(hl_symbol, is_buy, float(q_sz), {"market": {}}, False, None, "Gtc")  # type: ignore[misc]
                 except Exception as e:
                     if "indices must be integers" in str(e):
                         # Try simple positional dict and legacy variants
                         tried_ok = False
                         for args in [
-                            (hl_symbol, is_buy, float(q_sz), {"market": {}}, False, None, "Gtc"),
                             (hl_symbol, is_buy, float(q_sz), {"market": {}}),
-                            (hl_symbol, is_buy, float(q_sz), "market"),
+                            (hl_symbol, is_buy, float(q_sz), {"market": {}}, False),
                         ]:
                             try:
                                 response = self.client.order(*args)  # type: ignore[misc]
@@ -304,8 +289,7 @@ class HyperliquidBroker:
                             except Exception:
                                 continue
                         if not tried_ok:
-                            # Final attempt with keyword to satisfy strict signatures
-                            response = self.client.order(hl_symbol, is_buy, float(q_sz), order_type="market")  # type: ignore[misc]
+                            raise
                     else:
                         raise
                 log.debug(f"Hyperliquid order(positional, market) response: {response}")
