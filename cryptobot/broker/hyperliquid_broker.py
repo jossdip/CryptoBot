@@ -125,6 +125,18 @@ class HyperliquidBroker:
         log.info(
             f"Initialized HyperliquidBroker (testnet={self.conn.testnet}) at {self.conn.base_url}"
         )
+        # Diagnose SDK surface for adaptive order placement
+        try:
+            import inspect  # lazy import to avoid test import cost
+            has_market_open = hasattr(self.client, "market_open")
+            sig = None
+            try:
+                sig = str(inspect.signature(getattr(self.client, "order")))
+            except Exception:
+                sig = "unavailable"
+            log.debug(f"Hyperliquid SDK: market_open={has_market_open} | order.signature={sig}")
+        except Exception:
+            pass
 
     def place_order(
         self,
@@ -209,8 +221,13 @@ class HyperliquidBroker:
                                 # Try keyword order_type
                                 response = self.client.order(hl_symbol, is_buy, float(q_sz), limit_px, order_type="limit")  # type: ignore[misc]
                         else:
-                            # Legacy signature: order(coin, is_buy, sz, limit_px)
-                            response = self.client.order(hl_symbol, is_buy, float(q_sz), limit_px)  # type: ignore[misc]
+                            # Avoid legacy 4-arg call which omits order_type and fails on newer SDKs
+                            # Retry with explicit dict-only variant (some SDKs require fewer trailing args)
+                            try:
+                                response = self.client.order(hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px)}})  # type: ignore[misc]
+                            except TypeError:
+                                # Last attempt: positional price then explicit order_type
+                                response = self.client.order(hl_symbol, is_buy, float(q_sz), float(limit_px), "limit")  # type: ignore[misc]
                     except Exception as e:
                         if "float_to_wire" in str(e) or "rounding" in str(e):
                             step = self._get_size_step(hl_symbol)
@@ -227,8 +244,8 @@ class HyperliquidBroker:
                                         except TypeError:
                                             response = self.client.order(hl_symbol, is_buy, float(new_q), limit_px, order_type="limit")  # type: ignore[misc]
                                     else:
-                                        # Last resort: legacy float limit price
-                                        response = self.client.order(hl_symbol, is_buy, float(new_q), limit_px)  # type: ignore[misc]
+                                        # Final fallback: dict-only variant
+                                        response = self.client.order(hl_symbol, is_buy, float(new_q), {"limit": {"px": float(limit_px)}})  # type: ignore[misc]
                                 q_sz = new_q
                             else:
                                 raise
@@ -239,7 +256,6 @@ class HyperliquidBroker:
                                 (hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px)}}, False, None, "Gtc"),
                                 (hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px)}}),
                                 (hl_symbol, is_buy, float(q_sz), float(limit_px), "limit"),
-                                (hl_symbol, is_buy, float(q_sz), float(limit_px)),
                             ]:
                                 try:
                                     response = self.client.order(*args)  # type: ignore[misc]
