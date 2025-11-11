@@ -328,7 +328,8 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
     
     # Optimisation coûts: tracking pour allocation et budget
     last_allocation_ts = 0.0
-    monthly_budget_usd = float(getattr(cfg.llm, "monthly_budget_usd", 0.0))
+    # Budget disabled permanently
+    monthly_budget_usd = 0.0
     allocation_interval_sec = int(getattr(cfg.llm, "allocation_interval_sec", cfg.llm.decision_interval_sec))
     max_opportunities_per_cycle = int(getattr(cfg.llm, "max_opportunities_per_cycle", 999))
     min_opportunity_score = float(getattr(cfg.llm, "min_opportunity_score", 0.0))
@@ -450,22 +451,7 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
             except Exception:
                 pass
 
-            # Vérifier budget mensuel (si configuré) — ne plus quitter; passer en mode budget_exceeded
-            if monthly_budget_usd > 0.0:
-                try:
-                    stats = llm_client._cost_tracker.get_stats()
-                    if float(stats.get("estimated_monthly_cost", 0.0)) >= monthly_budget_usd:
-                        if not budget_exceeded:
-                            log.warning(
-                                f"Budget mensuel atteint: ${float(stats.get('estimated_monthly_cost', 0.0)):.2f} >= ${monthly_budget_usd:.2f} — pause des appels LLM, maintien du heartbeat"
-                            )
-                        budget_exceeded = True
-                    else:
-                        if budget_exceeded:
-                            log.info("Budget sous le seuil à nouveau — reprise des appels LLM")
-                        budget_exceeded = False
-                except Exception:
-                    pass
+            # Budget mensuel LLM désactivé: aucun gating par budget
             
             # 1. Gather market context
             context = context_aggregator.build_context(
@@ -535,7 +521,7 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                 params_interval_sec = float(getattr(getattr(cfg, "llm", object()), "params_interval_sec", allocation_interval_sec))
             except Exception:
                 params_interval_sec = allocation_interval_sec
-            if not budget_exceeded and not circuit_breaker_tripped and (current_time - last_params_ts >= params_interval_sec):
+            if not circuit_breaker_tripped and (current_time - last_params_ts >= params_interval_sec):
                 try:
                     rp = orchestrator.decide_runtime_parameters(
                         market_data=context["market"],
@@ -559,7 +545,7 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                             pass
                 except Exception:
                     pass
-            if budget_exceeded or circuit_breaker_tripped:
+            if circuit_breaker_tripped:
                 # Pas d'appels LLM — utiliser fallback adaptatif si activé, sinon réutiliser poids précédents
                 if adaptive_fallback_enabled and (current_time - last_allocation_ts >= allocation_interval_sec):
                     try:
@@ -638,7 +624,7 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
             weight_manager.weights = weights
 
             # 4. For each strategy (based on weights) - OPTIMISÉ pour réduire coûts
-            if not budget_exceeded and not circuit_breaker_tripped:
+            if not circuit_breaker_tripped:
                 opportunities_processed = 0
                 for strategy_name, strategy_instance in strategies.items():
                     weight = float(getattr(weights, strategy_name, 0.0))

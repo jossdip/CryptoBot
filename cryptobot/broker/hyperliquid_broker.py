@@ -159,6 +159,31 @@ class HyperliquidBroker:
         except Exception:
             return True
 
+    def _get_order_type_member(self, name: str) -> Optional[Any]:
+        """
+        Resolve an OrderType enum member by name (case-insensitive), supporting SDK variants.
+        Returns None if not available.
+        """
+        try:
+            if HlOrderType is None:
+                return None
+            # Enum members map
+            members = getattr(HlOrderType, "__members__", None)
+            if isinstance(members, dict):
+                for k, v in members.items():
+                    if str(k).lower() == str(name).lower():
+                        return v
+            # Attribute fallback
+            for attr in dir(HlOrderType):
+                if not attr.startswith("_") and attr.lower() == str(name).lower():
+                    try:
+                        return getattr(HlOrderType, attr)
+                    except Exception:
+                        continue
+        except Exception:
+            return None
+        return None
+
     def place_order(
         self,
         symbol: str,
@@ -230,16 +255,20 @@ class HyperliquidBroker:
                 if hasattr(self.client, "order"):
                     response = None
                     try:
-                        # Preferred: official signature with OrderType enum
-                        enum_limit = getattr(HlOrderType, "Limit", None) if HlOrderType is not None else None
+                        # Preferred: official signature with OrderType enum (robust resolution)
+                        enum_limit = self._get_order_type_member("Limit")
                         if enum_limit is not None:
                             response = self.client.order(hl_symbol, is_buy, float(q_sz), float(limit_px), enum_limit, False, client_id, None)  # type: ignore[misc]
                         else:
-                            # Fallback: previous dict-based API if enum is unavailable
-                            response = self.client.order(hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px)}})  # type: ignore[misc]
+                            # If enum not available, degrade to market to avoid dict/formatting issues
+                            if hasattr(self.client, "market_open"):
+                                log.warning("OrderType.Limit not available; degrading limit to market_open for compatibility")
+                                response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                            else:
+                                raise RuntimeError("No compatible order placement method found for limit orders (enum missing)")
                     except TypeError as e:
                         # If enum path failed due to signature specifics, try minimal variants
-                        enum_limit = getattr(HlOrderType, "Limit", None) if HlOrderType is not None else None
+                        enum_limit = self._get_order_type_member("Limit")
                         if enum_limit is not None:
                             # Try without optional args
                             try:
@@ -248,11 +277,12 @@ class HyperliquidBroker:
                                 # Last attempt: reduce_only only
                                 response = self.client.order(hl_symbol, is_buy, float(q_sz), float(limit_px), enum_limit, False)  # type: ignore[misc]
                         else:
-                            # Dict-based variants for older SDKs
-                            try:
-                                response = self.client.order(hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px)}}, False)  # type: ignore[misc]
-                            except TypeError:
-                                response = self.client.order(hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px)}}, False, None, "Gtc")  # type: ignore[misc]
+                            # If enum still not available, degrade to market
+                            if hasattr(self.client, "market_open"):
+                                log.warning("OrderType.Limit not available (TypeError); degrading limit to market_open")
+                                response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                            else:
+                                raise
                     except Exception as e:
                         if "float_to_wire" in str(e) or "rounding" in str(e):
                             step = self._get_size_step(hl_symbol)
@@ -260,19 +290,25 @@ class HyperliquidBroker:
                             if new_q > 0.0:
                                 log.debug(f"Retrying limit order with adjusted size due to wire rounding: {q_sz} -> {new_q}")
                                 try:
-                                    enum_limit = getattr(HlOrderType, "Limit", None) if HlOrderType is not None else None
+                                    enum_limit = self._get_order_type_member("Limit")
                                     if enum_limit is not None:
                                         response = self.client.order(hl_symbol, is_buy, float(new_q), float(limit_px), enum_limit)  # type: ignore[misc]
                                     else:
-                                        response = self.client.order(hl_symbol, is_buy, float(new_q), {"limit": {"px": float(limit_px)}})  # type: ignore[misc]
+                                        if hasattr(self.client, "market_open"):
+                                            log.warning("OrderType.Limit not available on retry; degrading limit to market_open")
+                                            response = self.client.market_open(hl_symbol, is_buy, float(new_q))  # type: ignore[misc]
+                                        else:
+                                            raise RuntimeError("No compatible order placement method found on retry")
                                 except TypeError as e2:
-                                    enum_limit = getattr(HlOrderType, "Limit", None) if HlOrderType is not None else None
+                                    enum_limit = self._get_order_type_member("Limit")
                                     if enum_limit is not None:
                                         # Try with reduce_only
                                         response = self.client.order(hl_symbol, is_buy, float(new_q), float(limit_px), enum_limit, False)  # type: ignore[misc]
                                     else:
-                                        # Last attempt with reduce_only flag (dict API)
-                                        response = self.client.order(hl_symbol, is_buy, float(new_q), {"limit": {"px": float(limit_px)}}, False)  # type: ignore[misc]
+                                        if hasattr(self.client, "market_open"):
+                                            response = self.client.market_open(hl_symbol, is_buy, float(new_q))  # type: ignore[misc]
+                                        else:
+                                            raise
                                 q_sz = new_q
                             else:
                                 raise
@@ -281,14 +317,14 @@ class HyperliquidBroker:
                             tried_ok = False
                             for args in [
                                 # Prefer enum signature first when available
-                                (hl_symbol, is_buy, float(q_sz), float(limit_px), getattr(HlOrderType, "Limit", None)) if HlOrderType is not None and getattr(HlOrderType, "Limit", None) is not None else None,
-                                (hl_symbol, is_buy, float(q_sz), float(limit_px), getattr(HlOrderType, "Limit", None), False) if HlOrderType is not None and getattr(HlOrderType, "Limit", None) is not None else None,
-                                # Dict-based fallbacks for older SDKs
-                                (hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px)}}),
-                                (hl_symbol, is_buy, float(q_sz), {"limit": {"px": float(limit_px)}}, False),
+                                (hl_symbol, is_buy, float(q_sz), float(limit_px), self._get_order_type_member("Limit")),
+                                (hl_symbol, is_buy, float(q_sz), float(limit_px), self._get_order_type_member("Limit"), False),
                             ]:
                                 try:
                                     if args is None:
+                                        continue
+                                    # Skip attempts with missing enum
+                                    if any((a is None for a in args)):
                                         continue
                                     response = self.client.order(*args)  # type: ignore[misc]
                                     tried_ok = True
@@ -296,7 +332,12 @@ class HyperliquidBroker:
                                 except Exception:
                                     continue
                             if not tried_ok:
-                                raise
+                                # Degrade to market if possible
+                                if hasattr(self.client, "market_open"):
+                                    log.warning("Legacy limit order path failed; degrading to market_open")
+                                    response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                                else:
+                                    raise
                     else:
                         raise
                     if response is not None:
@@ -312,14 +353,17 @@ class HyperliquidBroker:
                 response = None
                 try:
                     # Preferred: official signature (market via order with OrderType.Market)
-                    enum_market = getattr(HlOrderType, "Market", None) if HlOrderType is not None else None
+                    enum_market = self._get_order_type_member("Market")
                     if enum_market is not None:
                         response = self.client.order(hl_symbol, is_buy, float(q_sz), 0.0, enum_market, False, client_id, None)  # type: ignore[misc]
                     else:
-                        # Fallback: dict-based API
-                        response = self.client.order(hl_symbol, is_buy, float(q_sz), {"market": {}})  # type: ignore[misc]
+                        # If enum missing, prefer market_open if available
+                        if hasattr(self.client, "market_open"):
+                            response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                        else:
+                            raise RuntimeError("No compatible method for market order (enum missing, no market_open)")
                 except TypeError as e:
-                    enum_market = getattr(HlOrderType, "Market", None) if HlOrderType is not None else None
+                    enum_market = self._get_order_type_member("Market")
                     if enum_market is not None:
                         # Try without optional args
                         try:
@@ -328,23 +372,22 @@ class HyperliquidBroker:
                             # Last attempt: only reduce_only
                             response = self.client.order(hl_symbol, is_buy, float(q_sz), 0.0, enum_market, False)  # type: ignore[misc]
                     else:
-                        # Dict-based variants
-                        try:
-                            response = self.client.order(hl_symbol, is_buy, float(q_sz), {"market": {}}, False)  # type: ignore[misc]
-                        except TypeError:
-                            response = self.client.order(hl_symbol, is_buy, float(q_sz), {"market": {}}, False, None, "Gtc")  # type: ignore[misc]
+                        if hasattr(self.client, "market_open"):
+                            response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                        else:
+                            raise
                 except Exception as e:
                     if "indices must be integers" in str(e):
                         # Try simple positional dict and legacy variants
                         tried_ok = False
                         for args in [
-                            (hl_symbol, is_buy, float(q_sz), 0.0, getattr(HlOrderType, "Market", None)) if HlOrderType is not None and getattr(HlOrderType, "Market", None) is not None else None,
-                            (hl_symbol, is_buy, float(q_sz), 0.0, getattr(HlOrderType, "Market", None), False) if HlOrderType is not None and getattr(HlOrderType, "Market", None) is not None else None,
-                            (hl_symbol, is_buy, float(q_sz), {"market": {}}),
-                            (hl_symbol, is_buy, float(q_sz), {"market": {}}, False),
+                            (hl_symbol, is_buy, float(q_sz), 0.0, self._get_order_type_member("Market")),
+                            (hl_symbol, is_buy, float(q_sz), 0.0, self._get_order_type_member("Market"), False),
                         ]:
                             try:
                                 if args is None:
+                                    continue
+                                if any((a is None for a in args)):
                                     continue
                                 response = self.client.order(*args)  # type: ignore[misc]
                                 tried_ok = True
@@ -352,7 +395,10 @@ class HyperliquidBroker:
                             except Exception:
                                 continue
                         if not tried_ok:
-                            raise
+                            if hasattr(self.client, "market_open"):
+                                response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                            else:
+                                raise
                     else:
                         raise
                 log.debug(f"Hyperliquid order(positional, market) response: {response}")
@@ -411,19 +457,16 @@ class HyperliquidBroker:
                     response = None
                     if hasattr(self.client, "order"):
                         try:
-                            enum_limit = getattr(HlOrderType, "Limit", None) if HlOrderType is not None else None
+                            enum_limit = self._get_order_type_member("Limit")
                             if enum_limit is not None:
                                 # Attempt enum signature; 6th arg interpreted as reduce_only/post_only on some SDKs
                                 response = self.client.order(hl_symbol, (not is_long), float(q_sz), float(tp_px), enum_limit, True, None, None)  # type: ignore[misc]
                             else:
-                                # Dict-based fallback; include reduceOnly when supported
-                                try:
-                                    response = self.client.order(hl_symbol, (not is_long), float(q_sz), {"limit": {"px": float(tp_px)}}, True)  # type: ignore[misc]
-                                except TypeError:
-                                    response = self.client.order(hl_symbol, (not is_long), float(q_sz), {"limit": {"px": float(tp_px)}})  # type: ignore[misc]
+                                # If no enum support, skip on-exchange TP to avoid SDK signature mismatch
+                                response = None
                         except TypeError:
                             # Retry minimal variants
-                            enum_limit = getattr(HlOrderType, "Limit", None) if HlOrderType is not None else None
+                            enum_limit = self._get_order_type_member("Limit")
                             if enum_limit is not None:
                                 try:
                                     response = self.client.order(hl_symbol, (not is_long), float(q_sz), float(tp_px), enum_limit)  # type: ignore[misc]
@@ -437,26 +480,17 @@ class HyperliquidBroker:
             if sl_pct and sl_pct > 0.0:
                 try:
                     sl_trigger_px = entry_price * (1.0 - (sl_pct if is_long else -sl_pct))
-                    # Prefer dict-based trigger API if available; else skip
+                    # Prefer enum limit reduce-only when available; else skip (avoid dict payloads)
                     response = None
-                    if hasattr(self.client, "order"):
-                        try:
-                            # Old SDKs accept a 'trigger' payload
-                            trigger_payload = {"trigger": {"px": float(sl_trigger_px), "isMarket": True}, "reduceOnly": True}
-                            response = self.client.order(hl_symbol, (not is_long), float(q_sz), trigger_payload)  # type: ignore[misc]
-                        except TypeError:
-                            # Some SDKs expect a slightly different shape
-                            try:
-                                trigger_payload = {"trigger": {"triggerPx": float(sl_trigger_px), "isMarket": True}, "reduceOnly": True}
-                                response = self.client.order(hl_symbol, (not is_long), float(q_sz), trigger_payload)  # type: ignore[misc]
-                            except Exception:
-                                response = None
-                    if response is None:
-                        # If we cannot place a native stop, degrade gracefully by placing a far-out limit as last resort
-                        # Note: local bracket manager remains active as a safety net.
+                    enum_limit = self._get_order_type_member("Limit")
+                    if enum_limit is not None and hasattr(self.client, "order"):
+                        # Place a reduce-only limit as a proxy stop if enum is available
                         side = "sell" if is_long else "buy"
                         limit_px = self._quantize_price(hl_symbol, side, float(sl_trigger_px))
-                        response = self.client.order(hl_symbol, (not is_long), float(q_sz), {"limit": {"px": float(limit_px)}}, True)  # type: ignore[misc]
+                        try:
+                            response = self.client.order(hl_symbol, (not is_long), float(q_sz), float(limit_px), enum_limit, True, None, None)  # type: ignore[misc]
+                        except Exception:
+                            response = None
                     summary["sl"] = response
                 except Exception as e:
                     # Keep summary ok but record error; local bracket manager will still protect
