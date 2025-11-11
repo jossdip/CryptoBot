@@ -336,10 +336,9 @@ class HyperliquidBroker:
                                 if hasattr(self.client, "market_open"):
                                     log.warning("Legacy limit order path failed; degrading to market_open")
                                     response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
-                                else:
-                                    raise
-                    else:
-                        raise
+                            else:
+                                raise
+                    # No 'try-else' re-raise here; proceed with response handling
                     if response is not None:
                         log.debug(f"Hyperliquid order(positional, limit) response: {response}")
                     return {"ok": self._is_success_response(response), "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz), "limit_px": float(limit_px), "type": "limit"}, "response": response, "ts": time.time()}

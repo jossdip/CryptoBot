@@ -142,9 +142,6 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                 log.info(
                     f"LLM enabled | base_url={os.getenv('LLM_BASE_URL','')} | model={os.getenv('LLM_MODEL','')} | decision_interval={int(getattr(cfg.llm,'decision_interval_sec',30))}s"
                 )
-                mb = float(getattr(cfg.llm, 'monthly_budget_usd', 0.0))
-                if mb > 0:
-                    log.info(f"LLM budget: monthly_budget_usd={mb}")
             except Exception:
                 pass
     if not mode_manager.wallet_address or not mode_manager.private_key:
