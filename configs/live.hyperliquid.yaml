@@ -9,7 +9,7 @@ general:
   exchange_id: hyperliquid
 
 hyperliquid:
-  testnet: true  # false for live
+  testnet: false  # false for live
   wallet_address: ""  # from .env
   private_key: ""  # from .env (never commit!)
   default_leverage: 10
@@ -24,7 +24,7 @@ data:
 broker:
   fee_bps: 2  # Hyperliquid taker fee
   slippage_bps: 5
-  testnet: true
+  testnet: false
   margin_mode: isolated
   default_leverage: 10
   max_leverage: 50

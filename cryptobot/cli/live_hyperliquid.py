@@ -343,6 +343,13 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
     except Exception:
         daily_dd_limit_pct = 0.0
     circuit_breaker_tripped = False
+    # Debounce & cooldown controls
+    try:
+        circuit_breaker_cooldown_sec = float(getattr(getattr(cfg, "risk", object()), "circuit_breaker_cooldown_sec", 900.0))
+    except Exception:
+        circuit_breaker_cooldown_sec = 900.0
+    dd_confirmations = 0
+    cb_trip_ts: float | None = None
     # Base confidence gate
     try:
         base_min_confidence = float(getattr(getattr(cfg, "llm", object()), "min_confidence_to_execute", 0.6))
@@ -477,12 +484,34 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                         session_peak_equity = float(cur_eq)
                     if daily_dd_limit_pct > 0.0 and session_peak_equity and session_peak_equity > 0.0:
                         dd_pct = max(0.0, (float(session_peak_equity) - float(cur_eq)) / float(session_peak_equity) * 100.0)
-                        if dd_pct >= daily_dd_limit_pct and not circuit_breaker_tripped:
-                            circuit_breaker_tripped = True
-                            try:
-                                log.error(f"CIRCUIT BREAKER TRIPPED: drawdown={dd_pct:.2f}% >= limit={daily_dd_limit_pct:.2f}% — pausing new trades (heartbeat continues)")
-                            except Exception:
-                                pass
+                        # Debounce: require two consecutive exceedances
+                        if dd_pct >= daily_dd_limit_pct:
+                            dd_confirmations = min(dd_confirmations + 1, 3)
+                            if dd_confirmations >= 2 and not circuit_breaker_tripped:
+                                circuit_breaker_tripped = True
+                                cb_trip_ts = time.time()
+                                try:
+                                    log.error(f"CIRCUIT BREAKER TRIPPED: drawdown={dd_pct:.2f}% >= limit={daily_dd_limit_pct:.2f}% — pausing new trades (heartbeat continues)")
+                                except Exception:
+                                    pass
+                        else:
+                            dd_confirmations = 0
+                        # Cooldown auto-reset: resume after cooldown or strong recovery
+                        if circuit_breaker_tripped:
+                            recovered = dd_pct <= max(0.0, daily_dd_limit_pct * 0.5)
+                            cooldown_elapsed = (cb_trip_ts is not None) and ((time.time() - cb_trip_ts) >= circuit_breaker_cooldown_sec)
+                            if recovered or cooldown_elapsed:
+                                circuit_breaker_tripped = False
+                                dd_confirmations = 0
+                                # Reset peak to current equity to avoid immediate re-trip on noise
+                                session_peak_equity = float(cur_eq)
+                                try:
+                                    if recovered:
+                                        log.info(f"Circuit breaker auto-reset on recovery: drawdown={dd_pct:.2f}% <= {daily_dd_limit_pct*0.5:.2f}%")
+                                    elif cooldown_elapsed:
+                                        log.info(f"Circuit breaker cooldown elapsed ({int(circuit_breaker_cooldown_sec)}s) — resuming LLM trading")
+                                except Exception:
+                                    pass
                 # Gate allocation/trading entirely when tripped
             except Exception:
                 pass
