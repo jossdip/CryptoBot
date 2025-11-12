@@ -124,6 +124,33 @@ class StorageManager:
                 );
                 """
             )
+            # Learning tables: episodes and embeddings (optional)
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS episodes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp REAL,
+                    strategy TEXT,
+                    symbol TEXT,
+                    features_json TEXT,
+                    decision_json TEXT,
+                    outcome_json TEXT
+                );
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS episode_embeddings (
+                    episode_id INTEGER,
+                    vector BLOB,
+                    FOREIGN KEY(episode_id) REFERENCES episodes(id)
+                );
+                """
+            )
+            # Indexes for faster queries
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_ts ON episodes(timestamp)")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_strategy ON episodes(strategy)")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_episode_embeddings_eid ON episode_embeddings(episode_id)")
             # Online migration: ensure newly added columns exist in older DBs
             try:
                 cols = [row[1] for row in self._conn.execute("PRAGMA table_info(runtime_status)").fetchall()]
@@ -138,6 +165,93 @@ class StorageManager:
                 VALUES (1, 'STOPPED', 0, 0)
                 """
             )
+
+    # --- Learning CRUD ---
+    def record_episode(
+        self,
+        *,
+        timestamp: float,
+        strategy: str,
+        symbol: str,
+        features: Dict[str, Any],
+        decision: Dict[str, Any],
+        outcome: Dict[str, Any],
+    ) -> int:
+        """Insert an episode and return its id."""
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """
+                INSERT INTO episodes (timestamp, strategy, symbol, features_json, decision_json, outcome_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    float(timestamp),
+                    strategy,
+                    symbol,
+                    json.dumps(features or {}),
+                    json.dumps(decision or {}),
+                    json.dumps(outcome or {}),
+                ),
+            )
+            try:
+                return int(cur.lastrowid or 0)
+            except Exception:
+                return 0
+
+    def query_episodes(self, *, limit: int = 1000, strategy: Optional[str] = None) -> List[Dict[str, Any]]:
+        q = "SELECT id, timestamp, strategy, symbol, features_json, decision_json, outcome_json FROM episodes"
+        args: List[Any] = []
+        if strategy:
+            q += " WHERE strategy = ?"
+            args.append(strategy)
+        q += " ORDER BY timestamp DESC LIMIT ?"
+        args.append(int(limit))
+        rows = self._conn.execute(q, tuple(args)).fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            try:
+                out.append(
+                    {
+                        "id": int(r[0]),
+                        "timestamp": float(r[1]),
+                        "strategy": str(r[2]),
+                        "symbol": str(r[3]),
+                        "features": json.loads(r[4] or "{}"),
+                        "decision": json.loads(r[5] or "{}"),
+                        "outcome": json.loads(r[6] or "{}"),
+                    }
+                )
+            except Exception:
+                continue
+        return out
+
+    def record_episode_embedding(self, *, episode_id: int, vector: Iterable[float]) -> None:
+        """Store embedding vector for an episode as float32 bytes. No-op on errors."""
+        try:
+            import numpy as _np  # local import to avoid hard dependency at module import
+            vec = _np.asarray(list(vector), dtype=_np.float32).tobytes()
+        except Exception:
+            # Fallback: store empty vector
+            vec = b""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO episode_embeddings (episode_id, vector) VALUES (?, ?)",
+                (int(episode_id), vec),
+            )
+
+    def recent_episode_embeddings(self, *, limit: int = 2000) -> List[Tuple[int, bytes]]:
+        """Return recent (episode_id, vector_bytes) for external kNN; vectors may be empty when embedder=none."""
+        rows = self._conn.execute(
+            "SELECT episode_id, vector FROM episode_embeddings ORDER BY episode_id DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        out: List[Tuple[int, bytes]] = []
+        for r in rows:
+            try:
+                out.append((int(r[0]), bytes(r[1] or b"")))
+            except Exception:
+                continue
+        return out
 
     def record_trade(
         self,

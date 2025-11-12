@@ -4,7 +4,7 @@ general:
   end: "2030-01-01"
   timeframe: "1m"
   capital: 10000.0
-  symbols: ["BTC/USD:USD", "ETH/USD:USD"]
+  symbols: ["BTC/USD:USD", "ETH/USD:USD", "SOL/USD:USD", "AVAX/USD:USD", "DOGE/USD:USD", "LINK/USD:USD"]
   market_type: futures
   exchange_id: hyperliquid
 
@@ -30,7 +30,7 @@ broker:
   max_leverage: 50
 
 risk:
-  max_position_pct: 1.0
+  max_position_pct: 3.0
   max_daily_drawdown_pct: 10
   max_leverage_per_strategy: 30  # safety limit
 
@@ -39,21 +39,59 @@ llm:
   model: deepseek-chat
   base_url: https://api.deepseek.com/v1
   api_key: ""  # from .env
-  decision_interval_sec: 90  # Optimized: 90s au lieu de 30s (économise ~$22/mois)
+  decision_interval_sec: 30
   context_window_bars: 30  # Optimized: 30 bars au lieu de 60 (réduit tokens de 50%)
-  allocation_interval_sec: 180  # Allocation stratégies toutes les 3min au lieu de chaque cycle
-  max_opportunities_per_cycle: 5  # Limite opportunités par cycle pour réduire appels LLM
-  min_opportunity_score: 0.6  # Score minimum avant appel LLM (filtre préalable)
+  allocation_interval_sec: 60
+  max_opportunities_per_cycle: 12
+  min_opportunity_score: 0.25
+  min_confidence_to_execute: 0.65
   monthly_budget_usd: 32.0  # Budget mensuel max: 30€ ≈ $32
+  
+learning:
+  enabled: true
+  allocation_mode: hybrid   # {llm_only|bandit_only|hybrid}
+  allocation_hybrid_blend: 0.3
+  param_mode: bandit        # {static|bandit|bo}
+  memory:
+    enabled: true
+    knn_k: 8
+    max_episodes: 50000
+    embedder: "none"
+  bandits:
+    update_cadence_sec: 60
+    reward_cvar_alpha: 0.2
+    reward_scale: 1.0
+    per_strategy:
+      default:
+        leverage_grid: [2,4,6,8,10]
+        tp_grid_pct: [0.006,0.008,0.010,0.012,0.015]
+        sl_grid_pct: [0.004,0.005,0.006,0.008,0.010]
+        min_conf_grid: [0.50,0.55,0.60,0.65,0.70]
+      momentum:
+        leverage_grid: [6,10,14,18,20]
+      breakout:
+        leverage_grid: [6,10,14,18,20]
+      scalping:
+        leverage_grid: [4,8,10,12]
+      sniping:
+        leverage_grid: [8,12,16,20,25]
+  bo:
+    enabled: false
+    min_samples: 100
+    update_cadence_sec: 180
+  rl:
+    enabled: false
+    policy_path: "models/policy_rl.pt"
+    blend_weight: 0.25
   
 strategy_weights:
   initial_weights:
-    market_making: 0.35  # Base stable, revenus réguliers (stratégie #1)
-    momentum: 0.25  # Suit les tendances fortes (stratégie #2)
-    scalping: 0.15  # Trades fréquents, profits réguliers (stratégie #3)
-    arbitrage: 0.12  # Opportunités sûres mais limitées (stratégie #4)
-    breakout: 0.08  # Moins fréquent mais gros potentiel (stratégie #5)
-    sniping: 0.05  # Très risqué, limité (stratégie #6)
+    market_making: 0.05
+    momentum: 0.40
+    scalping: 0.20
+    arbitrage: 0.05
+    breakout: 0.25
+    sniping: 0.10
 
 sentiment:
   reddit:

@@ -27,6 +27,9 @@ from cryptobot.monitor.performance import PerformanceTracker
 from cryptobot.monitor.engine import MonitorEngine
 from cryptobot.data.context_aggregator import MarketContextAggregator
 from cryptobot.monitor.storage import StorageManager
+from cryptobot.learn.memory import Episode, EpisodeStore
+from cryptobot.learn.bandits import StrategyAllocationBandit, ParamBandit
+from cryptobot.core.config import LearningConfig
 
 
 def _expand(path: str) -> str:
@@ -230,6 +233,28 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
     llm_client = LLMClient.from_env()
     orchestrator = LLMOrchestrator(llm_client)
     weight_manager = WeightManager()
+    # Learning components (lazy-wired by config)
+    learning_cfg: LearningConfig = getattr(cfg, "learning", LearningConfig())
+    learning_enabled = bool(getattr(learning_cfg, "enabled", False))
+    episode_store: EpisodeStore | None = None
+    allocation_bandit: StrategyAllocationBandit | None = None
+    param_bandit: ParamBandit | None = None
+    if learning_enabled:
+        try:
+            episode_store = EpisodeStore(storage=storage, config=learning_cfg.memory)
+        except Exception:
+            episode_store = None
+        try:
+            allocation_bandit = StrategyAllocationBandit(
+                strategies=["market_making", "momentum", "scalping", "arbitrage", "breakout", "sniping"],
+                config=learning_cfg.bandits,
+            )
+        except Exception:
+            allocation_bandit = None
+        try:
+            param_bandit = ParamBandit(config=learning_cfg.bandits)
+        except Exception:
+            param_bandit = None
 
     # Seed initial weights from configuration if provided
     try:
@@ -394,6 +419,71 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
         
         return max(0.0, min(1.0, score))
 
+    def _extract_features_for_learning(
+        *,
+        context: Dict[str, Any],
+        strategy_name: str,
+        opportunity: Dict[str, Any],
+    ) -> Dict[str, float]:
+        """Build a compact numeric feature set in a deterministic key order."""
+        # Resolve symbol and price
+        try:
+            symbol = str(opportunity.get("symbol") or (context.get("symbols", [symbols[0]])[0] if isinstance(context.get("symbols"), list) else symbols[0]))
+        except Exception:
+            symbol = symbols[0]
+        # Median price across venues
+        price_map = context.get("prices", {}).get(symbol, {}) if isinstance(context.get("prices"), dict) else {}
+        vals = []
+        try:
+            vals = [float(v) for v in (price_map.values() if isinstance(price_map, dict) else []) if float(v) > 0]
+        except Exception:
+            vals = []
+        price_median = 0.0
+        if vals:
+            try:
+                import statistics
+                price_median = float(statistics.median(vals))
+            except Exception:
+                price_median = float(vals[-1])
+        vol_map = context.get("volatility", {}) if isinstance(context.get("volatility"), dict) else {}
+        volatility_1m = float(vol_map.get(symbol, 0.0))
+        pcp_map = context.get("price_change_pct", {}) if isinstance(context.get("price_change_pct"), dict) else {}
+        price_change_pct_1m = float(pcp_map.get(symbol, opportunity.get("price_change_pct", 0.0)))
+        spread = float(opportunity.get("spread", 0.0))
+        # Sentiment
+        sentiment = context.get("sentiment", {}) if isinstance(context.get("sentiment"), dict) else {}
+        sent_reddit = float(((sentiment.get("reddit", {}) or {}).get("score", 0.0)))
+        sent_twitter = float(((sentiment.get("twitter", {}) or {}).get("score", 0.0)))
+        sent_poly = float(((sentiment.get("polymarket", {}) or {}).get("score", 0.0)))
+        # Portfolio signals
+        portfolio = context.get("portfolio", {}) if isinstance(context.get("portfolio"), dict) else {}
+        unrealized_pnl = float(portfolio.get("unrealized_pnl", 0.0) or 0.0)
+        # Current strategy weights snapshot
+        try:
+            w = orchestrator.weights
+            w_map = {
+                "w_mm": float(getattr(w, "market_making", 0.0)),
+                "w_mom": float(getattr(w, "momentum", 0.0)),
+                "w_scalp": float(getattr(w, "scalping", 0.0)),
+                "w_arb": float(getattr(w, "arbitrage", 0.0)),
+                "w_brk": float(getattr(w, "breakout", 0.0)),
+                "w_snp": float(getattr(w, "sniping", 0.0)),
+            }
+        except Exception:
+            w_map = {"w_mm": 0.0, "w_mom": 0.0, "w_scalp": 0.0, "w_arb": 0.0, "w_brk": 0.0, "w_snp": 0.0}
+        out = {
+            "price_median": float(price_median),
+            "price_change_pct_1m": float(price_change_pct_1m),
+            "volatility_1m": float(volatility_1m),
+            "spread": float(spread),
+            "sent_reddit": float(sent_reddit),
+            "sent_twitter": float(sent_twitter),
+            "sent_polymarket": float(sent_poly),
+            "unrealized_pnl": float(unrealized_pnl),
+            **w_map,
+        }
+        return out
+
     stop_requested = False
     # Active local brackets: symbol -> dict(tp_pct, sl_pct, trailing_pct, entry_price, direction)
     active_brackets: Dict[str, Dict[str, float]] = {}
@@ -405,12 +495,12 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
         "market_making": {
             "edge_margin_bps": 2.0,
             "k_vol": 1.0,
-            "passive_order_fraction_of_alloc": 0.02,
+            "passive_order_fraction_of_alloc": 0.0,
             "passive_order_usd_cap": 250.0,
-            "passive_order_min_usd": 10.0,
+            "passive_order_min_usd": 0.0,
         },
         "risk": {
-            "min_hold_seconds": 20.0,
+            "min_hold_seconds": 12.0,
         },
     }
     last_params_ts = 0.0
@@ -617,6 +707,42 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                     # Réutiliser les poids précédents
                     weights = orchestrator.weights
 
+            # 2b. Learning-driven allocation blend
+            if learning_enabled and allocation_bandit is not None:
+                try:
+                    bandit_w = allocation_bandit.propose_weights()
+                    mode = str(getattr(learning_cfg, "allocation_mode", "hybrid"))
+                    blend = float(getattr(learning_cfg, "allocation_hybrid_blend", 0.5))
+                    from cryptobot.llm.orchestrator import StrategyWeight as _SW
+                    if mode == "llm_only":
+                        blended = weights
+                    elif mode == "bandit_only":
+                        blended = _SW(
+                            market_making=float(bandit_w.get("market_making", 0.0)),
+                            momentum=float(bandit_w.get("momentum", 0.0)),
+                            scalping=float(bandit_w.get("scalping", 0.0)),
+                            arbitrage=float(bandit_w.get("arbitrage", 0.0)),
+                            breakout=float(bandit_w.get("breakout", 0.0)),
+                            sniping=float(bandit_w.get("sniping", 0.0)),
+                        )
+                        blended.normalize()
+                    else:
+                        # hybrid
+                        bw = bandit_w
+                        lw = weights
+                        blended = _SW(
+                            market_making=float(blend * bw.get("market_making", 0.0) + (1.0 - blend) * float(getattr(lw, "market_making", 0.0))),
+                            momentum=float(blend * bw.get("momentum", 0.0) + (1.0 - blend) * float(getattr(lw, "momentum", 0.0))),
+                            scalping=float(blend * bw.get("scalping", 0.0) + (1.0 - blend) * float(getattr(lw, "scalping", 0.0))),
+                            arbitrage=float(blend * bw.get("arbitrage", 0.0) + (1.0 - blend) * float(getattr(lw, "arbitrage", 0.0))),
+                            breakout=float(blend * bw.get("breakout", 0.0) + (1.0 - blend) * float(getattr(lw, "breakout", 0.0))),
+                            sniping=float(blend * bw.get("sniping", 0.0) + (1.0 - blend) * float(getattr(lw, "sniping", 0.0))),
+                        )
+                        blended.normalize()
+                    weights = blended
+                except Exception:
+                    pass
+
             # 3. Update weight manager
             weight_manager.weights = weights
 
@@ -659,12 +785,67 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                             break
                         opportunities_processed += 1
                         
+                        # Learning memory enrichment (append to context)
+                        if learning_enabled and episode_store is not None and bool(getattr(learning_cfg.memory, "enabled", True)):
+                            try:
+                                feats = _extract_features_for_learning(context=context, strategy_name=strategy_name, opportunity=opportunity)
+                                knn = episode_store.knn(feats, k=int(getattr(learning_cfg.memory, "knn_k", 8)))
+                                similar = []
+                                for ep, sim in knn[:3]:
+                                    try:
+                                        similar.append(
+                                            {
+                                                "strategy": ep.strategy,
+                                                "symbol": ep.symbol,
+                                                "sim": float(sim),
+                                                "decision": {
+                                                    "direction": ep.decision.get("direction"),
+                                                    "leverage": ep.decision.get("leverage"),
+                                                },
+                                                "outcome": {"pnl": ep.outcome.get("pnl", 0.0)},
+                                            }
+                                        )
+                                    except Exception:
+                                        continue
+                                # attach to context for LLM prompt
+                                try:
+                                    if isinstance(context, dict):
+                                        context["learning_memory"] = {"similar_contexts": similar}
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
+
                         # Appel LLM uniquement pour opportunités scorées
                         decision = orchestrator.decide_trade(
                             strategy_name=strategy_name,
                             opportunity=opportunity,
                             market_context=context,
                         )
+                        # Learning param suggestions
+                        if learning_enabled and param_bandit is not None and str(getattr(learning_cfg, "param_mode", "bandit")) in {"bandit", "bo"}:
+                            try:
+                                feats = _extract_features_for_learning(context=context, strategy_name=strategy_name, opportunity=opportunity)
+                                suggestion = param_bandit.propose(strategy=strategy_name, features=feats)
+                                # Merge suggestion with decision under safety shield
+                                # Confidence gate: use max of both
+                                if "min_conf" in suggestion:
+                                    dynamic_min_confidence = max(dynamic_min_confidence, float(suggestion["min_conf"]))
+                                # Leverage: prefer higher between LLM and suggestion, then clamp by config later
+                                if "leverage" in suggestion:
+                                    try:
+                                        llm_lev = int(decision.get("leverage", 1))
+                                        decision["leverage"] = int(max(llm_lev, int(suggestion["leverage"])))
+                                    except Exception:
+                                        pass
+                                # TP/SL: adopt suggestion when LLM omitted; always enforce SL floor later
+                                if "tp_pct" in suggestion and not decision.get("take_profit_pct"):
+                                    decision["take_profit_pct"] = float(suggestion["tp_pct"])
+                                if "sl_pct" in suggestion:
+                                    cur_sl = float(decision.get("stop_loss_pct") or 0.0)
+                                    decision["stop_loss_pct"] = float(max(cur_sl, float(suggestion["sl_pct"])))
+                            except Exception:
+                                pass
                         # Safety: apply configurable confidence threshold (default 0.6) and clamp leverage conservatively
                         min_conf = float(dynamic_min_confidence)
                         conf = float(decision.get("confidence", 0.0))
@@ -683,6 +864,7 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                             # Market making: prefer very low leverage
                             if strategy_name == "market_making":
                                 lev = min(lev, 3)
+                            # Safety shield: global max leverage
                             decision["leverage"] = max(1, min(lev, max_lev_cfg))
                             decision["symbol"] = opportunity.get("symbol", symbols[0])
                             # Provide entry price for proper USD -> coin size conversion
@@ -690,6 +872,13 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                                 decision["entry_price"] = float(opportunity.get("price", 0.0) or opportunity.get("mid", 0.0) or 0.0)
                             except Exception:
                                 decision["entry_price"] = 0.0
+                            # Safety shield: enforce minimum stop loss floor
+                            try:
+                                sl_floor = 0.004
+                                if decision.get("stop_loss_pct") is None or float(decision.get("stop_loss_pct") or 0.0) < sl_floor:
+                                    decision["stop_loss_pct"] = sl_floor
+                            except Exception:
+                                pass
                             # Also carry spread for maker pricing (used to avoid taker fees)
                             try:
                                 decision["spread"] = float(opportunity.get("spread", 0.0))
@@ -721,7 +910,7 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                                 ok = bool(resp and isinstance(resp, dict) and resp.get("ok"))
                                 if ok:
                                     log.info(f"Executed {strategy_name} on {decision['symbol']} | size_usd={size_usd:.2f} | lev={int(decision.get('leverage', 1))} | dir={direction} | conf={conf:.2f}")
-                                    # Also record into monitor storage so it appears under Recent Trades (entry-only snapshot)
+                            # Also record into monitor storage so it appears under Recent Trades (entry-only snapshot)
                                     if monitor_engine:
                                         try:
                                             # Prefer actual filled size/price when available from broker response
@@ -760,6 +949,8 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                                                 pass
                                             # Schedule evaluation for learning loop
                                             try:
+                                                # Persist entry features for episode logging and bandit updates
+                                                entry_feats = _extract_features_for_learning(context=context, strategy_name=strategy_name, opportunity=opportunity)
                                                 pending_evaluations.append({
                                                     "strategy": strategy_name,
                                                     "symbol": decision["symbol"],
@@ -767,6 +958,15 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                                                     "entry_price": float(entry_px if entry_px > 0 else (opportunity.get("price", 0.0) or opportunity.get("mid", 0.0) or 0.0)),
                                                     "size": float(coin_sz),
                                                     "ts_open": time.time(),
+                                                    "features": entry_feats,
+                                                    "decision": {
+                                                        "direction": direction,
+                                                        "leverage": int(decision.get("leverage", 1)),
+                                                        "stop_loss_pct": float(decision.get("stop_loss_pct") or 0.0),
+                                                        "take_profit_pct": float(decision.get("take_profit_pct") or 0.0),
+                                                        "confidence": float(decision.get("confidence") or 0.0),
+                                                        "size_usd": float(size_usd),
+                                                    },
                                                 })
                                             except Exception:
                                                 pass
@@ -791,6 +991,14 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                                             try:
                                                 tp_pct = float(decision.get("take_profit_pct") or 0.0)
                                                 sl_pct = float(decision.get("stop_loss_pct") or 0.0)
+                                                # Sensible defaults when LLM omits brackets (risk first, strategy-aware)
+                                                if (tp_pct <= 0.0 and sl_pct <= 0.0):
+                                                    if strategy_name in {"momentum", "breakout"}:
+                                                        tp_pct, sl_pct = 0.010, 0.006
+                                                    elif strategy_name == "scalping":
+                                                        tp_pct, sl_pct = 0.007, 0.005
+                                                    elif strategy_name == "sniping":
+                                                        tp_pct, sl_pct = 0.015, 0.010
                                                 if (tp_pct and tp_pct > 0.0) or (sl_pct and sl_pct > 0.0):
                                                     br = broker.place_bracket_orders(
                                                         symbol=decision["symbol"],
@@ -837,8 +1045,12 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                                         min_usd = float(runtime_params["market_making"]["passive_order_min_usd"])
                                     except Exception:
                                         edge_margin_bps, k_vol, passive_frac, passive_cap_usd, min_usd = 2.0, 1.0, 0.02, 250.0, 10.0
+                                    # If passive making is disabled (fraction==0), skip fallback entirely
+                                    if passive_frac <= 0.0:
+                                        log.debug(f"Passive maker disabled by runtime_params; skipping | sym={sym}")
+                                        continue
                                     min_required_spread = (2.0 * fee_bps / 10000.0) + (edge_margin_bps / 10000.0) + (k_vol * max(0.0, vol))
-                                    if mid > 0.0 and spr >= min_required_spread:
+                                    if mid > 0.0 and spr >= min_required_spread and passive_frac > 0.0:
                                         # Size maker orders by allocation
                                         try:
                                             alloc = float(executor.total_capital) * float(getattr(weights, "market_making", 0.0))
@@ -1129,6 +1341,28 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
                                 )
                         except Exception:
                             pass
+                        # Learning feedback: bandit updates + episode record
+                        if learning_enabled:
+                            try:
+                                reward = float(pnl) * float(getattr(learning_cfg.bandits, "reward_scale", 1.0))
+                                strat = str(p.get("strategy", "unknown"))
+                                if allocation_bandit is not None:
+                                    allocation_bandit.update(strategy=strat, reward=reward)
+                                if param_bandit is not None:
+                                    param_bandit.update(strategy=strat, reward=reward, features=p.get("features"))
+                                if episode_store is not None:
+                                    ep = Episode(
+                                        id=None,
+                                        timestamp=float(p.get("ts_open", now_ts)),
+                                        strategy=strat,
+                                        symbol=sym,
+                                        features={k: float(v) for k, v in ((p.get("features") or {}).items())},
+                                        decision=p.get("decision") or {},
+                                        outcome={"pnl": float(pnl), "fees": float(est_fees), "exit_price": float(exit_price)},
+                                    )
+                                    episode_store.add_episode(ep)
+                            except Exception:
+                                pass
                 pending_evaluations = remaining
             except Exception:
                 # If learning loop fails, do not impact trading

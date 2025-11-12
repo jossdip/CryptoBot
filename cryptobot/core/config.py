@@ -127,6 +127,71 @@ class MonitorConfig(BaseModel):
     llm_insights_enabled: bool = True
 
 
+class LearningMemoryConfig(BaseModel):
+    enabled: bool = True
+    knn_k: int = 8
+    max_episodes: int = 50000
+    # none | sbert-mini | openai-text-ada (we only implement 'none' + optional 'sbert-mini' fallback)
+    embedder: str = "none"
+
+
+class LearningBanditsConfig(BaseModel):
+    update_cadence_sec: int = 60
+    reward_cvar_alpha: float = 0.2
+    reward_scale: float = 1.0
+    # per_strategy is a free-form mapping where each strategy may override grids.
+    # Example:
+    #   {
+    #     "default": {
+    #       "leverage_grid": [2,4,6,8,10],
+    #       "tp_grid_pct": [0.006,0.008,0.010,0.012,0.015],
+    #       "sl_grid_pct": [0.004,0.005,0.006,0.008,0.010],
+    #       "min_conf_grid": [0.50,0.55,0.60,0.65,0.70]
+    #     },
+    #     "momentum": {"leverage_grid": [6,10,14,18,20]},
+    #     ...
+    #   }
+    per_strategy: Dict[str, Dict[str, List[float]]] = Field(
+        default_factory=lambda: {
+            "default": {
+                "leverage_grid": [2, 4, 6, 8, 10],
+                "tp_grid_pct": [0.006, 0.008, 0.010, 0.012, 0.015],
+                "sl_grid_pct": [0.004, 0.005, 0.006, 0.008, 0.010],
+                "min_conf_grid": [0.50, 0.55, 0.60, 0.65, 0.70],
+            },
+            "momentum": {"leverage_grid": [6, 10, 14, 18, 20]},
+            "breakout": {"leverage_grid": [6, 10, 14, 18, 20]},
+            "scalping": {"leverage_grid": [4, 8, 10, 12]},
+            "sniping": {"leverage_grid": [8, 12, 16, 20, 25]},
+        }
+    )
+
+
+class LearningBOConfig(BaseModel):
+    enabled: bool = False
+    min_samples: int = 100
+    update_cadence_sec: int = 180
+
+
+class LearningRLConfig(BaseModel):
+    enabled: bool = False
+    policy_path: str = "models/policy_rl.pt"
+    blend_weight: float = 0.25
+
+
+class LearningConfig(BaseModel):
+    enabled: bool = False
+    # allocation_mode: llm_only | bandit_only | hybrid
+    allocation_mode: str = "hybrid"
+    allocation_hybrid_blend: float = 0.5  # contribution of bandit when hybrid
+    # param_mode: static | bandit | bo
+    param_mode: str = "bandit"
+    memory: LearningMemoryConfig = Field(default_factory=LearningMemoryConfig)
+    bandits: LearningBanditsConfig = Field(default_factory=LearningBanditsConfig)
+    bo: LearningBOConfig = Field(default_factory=LearningBOConfig)
+    rl: LearningRLConfig = Field(default_factory=LearningRLConfig)
+
+
 class AppConfig(BaseModel):
     general: GeneralConfig
     data: DataConfig
@@ -142,6 +207,7 @@ class AppConfig(BaseModel):
     sentiment: SentimentConfig = Field(default_factory=SentimentConfig)
     cli: CLIConfig = Field(default_factory=CLIConfig)
     monitor: MonitorConfig = Field(default_factory=MonitorConfig)
+    learning: LearningConfig = Field(default_factory=LearningConfig)
 
     @staticmethod
     def load(path: str | Path) -> "AppConfig":

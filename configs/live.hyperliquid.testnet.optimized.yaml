@@ -51,6 +51,43 @@ llm:
   min_opportunity_score: 0.6  # Filtre préalable: score min 0.6 avant appel LLM (économise ~$5/mois)
   monthly_budget_usd: 32.0  # Budget mensuel max: 30€ ≈ $32 (arrête le bot si dépassé)
   
+learning:
+  enabled: true
+  allocation_mode: hybrid   # {llm_only|bandit_only|hybrid}
+  allocation_hybrid_blend: 0.3
+  param_mode: bandit        # {static|bandit|bo}
+  memory:
+    enabled: true
+    knn_k: 8
+    max_episodes: 50000
+    embedder: "none"
+  bandits:
+    update_cadence_sec: 60
+    reward_cvar_alpha: 0.2
+    reward_scale: 1.0
+    per_strategy:
+      default:
+        leverage_grid: [2,4,6,8,10]
+        tp_grid_pct: [0.006,0.008,0.010,0.012,0.015]
+        sl_grid_pct: [0.004,0.005,0.006,0.008,0.010]
+        min_conf_grid: [0.50,0.55,0.60,0.65,0.70]
+      momentum:
+        leverage_grid: [6,10,14,18,20]
+      breakout:
+        leverage_grid: [6,10,14,18,20]
+      scalping:
+        leverage_grid: [4,8,10,12]
+      sniping:
+        leverage_grid: [8,12,16,20,25]
+  bo:
+    enabled: false
+    min_samples: 100
+    update_cadence_sec: 180
+  rl:
+    enabled: false
+    policy_path: "models/policy_rl.pt"
+    blend_weight: 0.25
+
 strategy_weights:
   initial_weights:
     market_making: 0.35  # Base stable, revenus réguliers (stratégie #1)

@@ -143,6 +143,37 @@ class HyperliquidBroker:
         except Exception:
             pass
 
+    def _call_with_retries(self, fn, *args, **kwargs):
+        """
+        Execute an SDK call with conservative retries on transient network issues.
+        Retries are only attempted for errors that look like network/timeout/ratelimit.
+        """
+        max_attempts = 3
+        backoff = 0.25
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e:
+                msg = str(e).lower()
+                transient = (
+                    "timeout" in msg
+                    or "timed out" in msg
+                    or "rate limit" in msg
+                    or "429" in msg
+                    or "connection reset" in msg
+                    or "connection aborted" in msg
+                    or "connection refused" in msg
+                    or "server disconnected" in msg
+                    or "temporarily unavailable" in msg
+                )
+                if not transient or attempt >= max_attempts:
+                    raise
+                try:
+                    time.sleep(backoff)
+                except Exception:
+                    pass
+                backoff *= 2.0
+
     def _is_success_response(self, response: Any) -> bool:
         """
         Best-effort check to ensure the SDK call succeeded.
@@ -200,6 +231,12 @@ class HyperliquidBroker:
 
         Returns a structured dict with order identifiers and status.
         """
+        # Generate a lightweight client id to improve traceability and reduce duplicates
+        if not client_id:
+            try:
+                client_id = f"cb-{int(time.time()*1000)}"
+            except Exception:
+                client_id = None
         if leverage < 1 or leverage > 50:
             raise ValueError("leverage must be within 1..50 for Hyperliquid")
 
@@ -217,7 +254,7 @@ class HyperliquidBroker:
             try:
                 if hasattr(self.client, "update_leverage"):
                     # Typical signature: update_leverage(coin="BTC", leverage=5)
-                    self.client.update_leverage(coin=hl_symbol, leverage=int(leverage))  # type: ignore[attr-defined]
+                    self._call_with_retries(self.client.update_leverage, coin=hl_symbol, leverage=int(leverage))  # type: ignore[attr-defined]
             except Exception:
                 pass
 
@@ -226,7 +263,7 @@ class HyperliquidBroker:
                 q_sz = self._quantize_size(hl_symbol, float(size))
                 response = None
                 try:
-                    response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                    response = self._call_with_retries(self.client.market_open, hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
                 except Exception as e:
                     # Retry once if wire rounding complained; reduce by one size step
                     if "float_to_wire" in str(e) or "rounding" in str(e):
@@ -234,7 +271,7 @@ class HyperliquidBroker:
                         new_q = max(0.0, float(Decimal(str(q_sz)) - Decimal(str(step))))
                         if new_q > 0.0:
                             log.debug(f"Retrying market_open with adjusted size due to wire rounding: {q_sz} -> {new_q}")
-                            response = self.client.market_open(hl_symbol, is_buy, float(new_q))  # type: ignore[misc]
+                            response = self._call_with_retries(self.client.market_open, hl_symbol, is_buy, float(new_q))  # type: ignore[misc]
                             q_sz = new_q
                         else:
                             raise
@@ -258,12 +295,12 @@ class HyperliquidBroker:
                         # Preferred: official signature with OrderType enum (robust resolution)
                         enum_limit = self._get_order_type_member("Limit")
                         if enum_limit is not None:
-                            response = self.client.order(hl_symbol, is_buy, float(q_sz), float(limit_px), enum_limit, False, client_id, None)  # type: ignore[misc]
+                            response = self._call_with_retries(self.client.order, hl_symbol, is_buy, float(q_sz), float(limit_px), enum_limit, False, client_id, None)  # type: ignore[misc]
                         else:
                             # If enum not available, degrade to market to avoid dict/formatting issues
                             if hasattr(self.client, "market_open"):
                                 log.warning("OrderType.Limit not available; degrading limit to market_open for compatibility")
-                                response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                                response = self._call_with_retries(self.client.market_open, hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
                             else:
                                 raise RuntimeError("No compatible order placement method found for limit orders (enum missing)")
                     except TypeError as e:
@@ -272,15 +309,15 @@ class HyperliquidBroker:
                         if enum_limit is not None:
                             # Try without optional args
                             try:
-                                response = self.client.order(hl_symbol, is_buy, float(q_sz), float(limit_px), enum_limit)  # type: ignore[misc]
+                                response = self._call_with_retries(self.client.order, hl_symbol, is_buy, float(q_sz), float(limit_px), enum_limit)  # type: ignore[misc]
                             except TypeError:
                                 # Last attempt: reduce_only only
-                                response = self.client.order(hl_symbol, is_buy, float(q_sz), float(limit_px), enum_limit, False)  # type: ignore[misc]
+                                response = self._call_with_retries(self.client.order, hl_symbol, is_buy, float(q_sz), float(limit_px), enum_limit, False)  # type: ignore[misc]
                         else:
                             # If enum still not available, degrade to market
                             if hasattr(self.client, "market_open"):
                                 log.warning("OrderType.Limit not available (TypeError); degrading limit to market_open")
-                                response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                                response = self._call_with_retries(self.client.market_open, hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
                             else:
                                 raise
                     except Exception as e:
@@ -292,21 +329,21 @@ class HyperliquidBroker:
                                 try:
                                     enum_limit = self._get_order_type_member("Limit")
                                     if enum_limit is not None:
-                                        response = self.client.order(hl_symbol, is_buy, float(new_q), float(limit_px), enum_limit)  # type: ignore[misc]
+                                        response = self._call_with_retries(self.client.order, hl_symbol, is_buy, float(new_q), float(limit_px), enum_limit)  # type: ignore[misc]
                                     else:
                                         if hasattr(self.client, "market_open"):
                                             log.warning("OrderType.Limit not available on retry; degrading limit to market_open")
-                                            response = self.client.market_open(hl_symbol, is_buy, float(new_q))  # type: ignore[misc]
+                                            response = self._call_with_retries(self.client.market_open, hl_symbol, is_buy, float(new_q))  # type: ignore[misc]
                                         else:
                                             raise RuntimeError("No compatible order placement method found on retry")
                                 except TypeError as e2:
                                     enum_limit = self._get_order_type_member("Limit")
                                     if enum_limit is not None:
                                         # Try with reduce_only
-                                        response = self.client.order(hl_symbol, is_buy, float(new_q), float(limit_px), enum_limit, False)  # type: ignore[misc]
+                                        response = self._call_with_retries(self.client.order, hl_symbol, is_buy, float(new_q), float(limit_px), enum_limit, False)  # type: ignore[misc]
                                     else:
                                         if hasattr(self.client, "market_open"):
-                                            response = self.client.market_open(hl_symbol, is_buy, float(new_q))  # type: ignore[misc]
+                                            response = self._call_with_retries(self.client.market_open, hl_symbol, is_buy, float(new_q))  # type: ignore[misc]
                                         else:
                                             raise
                                 q_sz = new_q
@@ -326,7 +363,7 @@ class HyperliquidBroker:
                                     # Skip attempts with missing enum
                                     if any((a is None for a in args)):
                                         continue
-                                    response = self.client.order(*args)  # type: ignore[misc]
+                                    response = self._call_with_retries(self.client.order, *args)  # type: ignore[misc]
                                     tried_ok = True
                                     break
                                 except Exception:
@@ -335,7 +372,7 @@ class HyperliquidBroker:
                                 # Degrade to market if possible
                                 if hasattr(self.client, "market_open"):
                                     log.warning("Legacy limit order path failed; degrading to market_open")
-                                    response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                                    response = self._call_with_retries(self.client.market_open, hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
                             else:
                                 raise
                     # No 'try-else' re-raise here; proceed with response handling
@@ -343,7 +380,7 @@ class HyperliquidBroker:
                         log.debug(f"Hyperliquid order(positional, limit) response: {response}")
                     return {"ok": self._is_success_response(response), "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz), "limit_px": float(limit_px), "type": "limit"}, "response": response, "ts": time.time()}
                 # Fallback: place a market order if limit path not available
-                response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                response = self._call_with_retries(self.client.market_open, hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
                 log.debug(f"Hyperliquid market_open(as fallback for limit) response: {response}")
                 return {"ok": self._is_success_response(response), "request": {"coin": hl_symbol, "is_buy": is_buy, "sz": float(q_sz), "type": "market"}, "response": response, "ts": time.time()}
             # 3) Market orders without market_open: try generic 'order(coin, is_buy, sz)'
@@ -354,11 +391,11 @@ class HyperliquidBroker:
                     # Preferred: official signature (market via order with OrderType.Market)
                     enum_market = self._get_order_type_member("Market")
                     if enum_market is not None:
-                        response = self.client.order(hl_symbol, is_buy, float(q_sz), 0.0, enum_market, False, client_id, None)  # type: ignore[misc]
+                        response = self._call_with_retries(self.client.order, hl_symbol, is_buy, float(q_sz), 0.0, enum_market, False, client_id, None)  # type: ignore[misc]
                     else:
                         # If enum missing, prefer market_open if available
                         if hasattr(self.client, "market_open"):
-                            response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                            response = self._call_with_retries(self.client.market_open, hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
                         else:
                             raise RuntimeError("No compatible method for market order (enum missing, no market_open)")
                 except TypeError as e:
@@ -366,13 +403,13 @@ class HyperliquidBroker:
                     if enum_market is not None:
                         # Try without optional args
                         try:
-                            response = self.client.order(hl_symbol, is_buy, float(q_sz), 0.0, enum_market)  # type: ignore[misc]
+                            response = self._call_with_retries(self.client.order, hl_symbol, is_buy, float(q_sz), 0.0, enum_market)  # type: ignore[misc]
                         except TypeError:
                             # Last attempt: only reduce_only
-                            response = self.client.order(hl_symbol, is_buy, float(q_sz), 0.0, enum_market, False)  # type: ignore[misc]
+                            response = self._call_with_retries(self.client.order, hl_symbol, is_buy, float(q_sz), 0.0, enum_market, False)  # type: ignore[misc]
                     else:
                         if hasattr(self.client, "market_open"):
-                            response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                            response = self._call_with_retries(self.client.market_open, hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
                         else:
                             raise
                 except Exception as e:
@@ -388,14 +425,14 @@ class HyperliquidBroker:
                                     continue
                                 if any((a is None for a in args)):
                                     continue
-                                response = self.client.order(*args)  # type: ignore[misc]
+                                response = self._call_with_retries(self.client.order, *args)  # type: ignore[misc]
                                 tried_ok = True
                                 break
                             except Exception:
                                 continue
                         if not tried_ok:
                             if hasattr(self.client, "market_open"):
-                                response = self.client.market_open(hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
+                                response = self._call_with_retries(self.client.market_open, hl_symbol, is_buy, float(q_sz))  # type: ignore[misc]
                             else:
                                 raise
                     else:
@@ -459,7 +496,7 @@ class HyperliquidBroker:
                             enum_limit = self._get_order_type_member("Limit")
                             if enum_limit is not None:
                                 # Attempt enum signature; 6th arg interpreted as reduce_only/post_only on some SDKs
-                                response = self.client.order(hl_symbol, (not is_long), float(q_sz), float(tp_px), enum_limit, True, None, None)  # type: ignore[misc]
+                                response = self._call_with_retries(self.client.order, hl_symbol, (not is_long), float(q_sz), float(tp_px), enum_limit, True, None, None)  # type: ignore[misc]
                             else:
                                 # If no enum support, skip on-exchange TP to avoid SDK signature mismatch
                                 response = None
@@ -468,7 +505,7 @@ class HyperliquidBroker:
                             enum_limit = self._get_order_type_member("Limit")
                             if enum_limit is not None:
                                 try:
-                                    response = self.client.order(hl_symbol, (not is_long), float(q_sz), float(tp_px), enum_limit)  # type: ignore[misc]
+                                    response = self._call_with_retries(self.client.order, hl_symbol, (not is_long), float(q_sz), float(tp_px), enum_limit)  # type: ignore[misc]
                                 except Exception:
                                     response = None
                     summary["tp"] = response
@@ -487,7 +524,7 @@ class HyperliquidBroker:
                         side = "sell" if is_long else "buy"
                         limit_px = self._quantize_price(hl_symbol, side, float(sl_trigger_px))
                         try:
-                            response = self.client.order(hl_symbol, (not is_long), float(q_sz), float(limit_px), enum_limit, True, None, None)  # type: ignore[misc]
+                            response = self._call_with_retries(self.client.order, hl_symbol, (not is_long), float(q_sz), float(limit_px), enum_limit, True, None, None)  # type: ignore[misc]
                         except Exception:
                             response = None
                     summary["sl"] = response
@@ -868,8 +905,18 @@ class HyperliquidBroker:
             if HyperliquidInfo is not None:
                 info_client = None
                 last_err: Optional[Exception] = None
+                # Try a few constructor variants, preferring explicit chain for correct network
+                chain_kw = {}
+                try:
+                    if _HLChain is not None:
+                        chain_kw = {"chain": (_HLChain.TESTNET if bool(self.conn.testnet) else _HLChain.MAINNET)}  # type: ignore[assignment]
+                except Exception:
+                    chain_kw = {}
                 # Try a few constructor variants
                 for args, kwargs in (
+                    ((), {"base_url": self.conn.base_url, **chain_kw}),
+                    ((self.conn.base_url,), {**chain_kw}),
+                    ((), {**chain_kw}),
                     ((), {"base_url": self.conn.base_url}),
                     ((self.conn.base_url,), {}),
                     ((), {}),
@@ -970,7 +1017,7 @@ class HyperliquidBroker:
         """Return current funding rate for a symbol (% per funding interval)."""
         try:
             # rate_info = self.client.get_funding_rate(symbol=symbol)
-            rate_info: Dict[str, Any] = self.client.get_funding_rate(symbol=symbol)  # type: ignore[assignment]
+            rate_info: Dict[str, Any] = self._call_with_retries(self.client.get_funding_rate, symbol=symbol)  # type: ignore[assignment]
             # Best effort extraction
             for k in ("rate", "fundingRate", "current"):
                 if k in rate_info:
