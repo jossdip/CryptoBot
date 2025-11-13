@@ -386,29 +386,116 @@ class InteractiveShell:
                 pass
         force = bool(args and any(a in {"--force", "-f"} for a in args))
         sent_signal = False
-        # Always attempt cooperative remote stop first (the live runner now honors it unconditionally)
+        # 1) Request cooperative stop via monitor DB (runner polls this and exits gracefully)
         try:
             storage = self._get_storage()
             storage.request_runtime_stop()
             self.console.print("Requested remote cooperative stop.")
         except Exception:
             pass
-        # If --force provided, also send SIGTERM
-        if force:
-            try:
-                rs = self._get_reporter().runtime_status() or {}
-                pid = int(rs.get("pid")) if rs.get("pid") is not None else None
-                if pid:
-                    os.kill(pid, signal.SIGTERM)
-                    sent_signal = True
-                    self.console.print(f"Sent SIGTERM to pid {pid}")
-            except Exception as e:
-                self.console.print(f"[red]Force/Signal stop failed:[/red] {e}")
-        # Also stop local in-process thread if present
+        # Always request local in-process thread stop if any
         if self._running_thread and self._running_thread.is_alive():
             self._stop_event.set()
-            if not sent_signal:
-                self.console.print("Requesting local stop...")
+        # 2) Wait briefly for the bot to acknowledge stop (based on runtime_status + heartbeat freshness)
+        try:
+            cfg = self.context.get("config")
+            decision_interval = int(getattr(getattr(cfg, "llm", None), "decision_interval_sec", 30)) if cfg else 30
+            freshness_threshold = max(15, decision_interval * 3)
+            deadline = time.time() + 6.0
+            while time.time() < deadline:
+                rs = self._get_reporter().runtime_status() or {}
+                last_hb = float(rs.get("last_heartbeat") or 0.0)
+                runtime_status = str(rs.get("status") or "STOPPED")
+                fresh = (time.time() - last_hb) < float(freshness_threshold)
+                if runtime_status != "ACTIVE" or not fresh:
+                    break
+                time.sleep(0.2)
+        except Exception:
+            pass
+        # Re-check; if still active, escalate
+        needs_escalation = False
+        try:
+            rs = self._get_reporter().runtime_status() or {}
+            last_hb = float(rs.get("last_heartbeat") or 0.0)
+            runtime_status = str(rs.get("status") or "STOPPED")
+            cfg = self.context.get("config")
+            decision_interval = int(getattr(getattr(cfg, "llm", None), "decision_interval_sec", 30)) if cfg else 30
+            freshness_threshold = max(15, decision_interval * 3)
+            fresh = (time.time() - last_hb) < float(freshness_threshold)
+            needs_escalation = (runtime_status == "ACTIVE" and fresh)
+        except Exception:
+            needs_escalation = True
+        if needs_escalation or force:
+            # 3) Try to gracefully terminate the known DB pid first
+            try:
+                rs = self._get_reporter().runtime_status() or {}
+                db_pid = int(rs.get("pid")) if rs.get("pid") is not None else None
+            except Exception:
+                db_pid = None
+            target_pids = []
+            if db_pid:
+                target_pids.append(db_pid)
+            # Also consider any other matching bot processes (avoid dups)
+            try:
+                for p in self._list_bot_pids():
+                    if not db_pid or p != db_pid:
+                        target_pids.append(p)
+            except Exception:
+                pass
+            target_pids = list({p for p in target_pids if p and p > 0})
+            if target_pids:
+                for p in target_pids:
+                    try:
+                        os.kill(p, signal.SIGTERM)
+                        sent_signal = True
+                        self.console.print(f"Sent SIGTERM to pid {p}")
+                    except ProcessLookupError:
+                        pass
+                    except Exception as e:
+                        self.console.print(f"[yellow]SIGTERM failed for pid {p}:[/yellow] {e}")
+                # Wait up to 8s for processes to exit, then escalate to SIGKILL
+                waited = 0.0
+                try:
+                    while waited < 8.0:
+                        alive = []
+                        for p in list(target_pids):
+                            try:
+                                os.kill(p, 0)
+                                alive.append(p)
+                            except ProcessLookupError:
+                                continue
+                            except Exception:
+                                alive.append(p)
+                        if not alive:
+                            break
+                        time.sleep(0.5)
+                        waited += 0.5
+                    # SIGKILL any stubborn survivors
+                    for p in list(target_pids):
+                        try:
+                            os.kill(p, 0)
+                            os.kill(p, signal.SIGKILL)
+                            self.console.print(f"Sent SIGKILL to pid {p}")
+                        except ProcessLookupError:
+                            pass
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        # 4) Best-effort cleanup: mark STOPPED in runtime DB and clear stop flag
+        try:
+            storage = self._get_storage()
+            storage.set_runtime_stopped()
+            storage.clear_runtime_stop_request()
+        except Exception:
+            pass
+        # Remove local run metadata (if created by this shell)
+        try:
+            run_pid_path = Path(".").joinpath(".run_pid")
+            if run_pid_path.exists():
+                run_pid_path.unlink(missing_ok=True)  # type: ignore[arg-type]
+        except Exception:
+            pass
         self._status = "STOPPED"
 
     def _restart_trading(self, args: Optional[List[str]] = None) -> None:

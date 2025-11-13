@@ -7,6 +7,7 @@ import os
 import threading
 from pathlib import Path
 import fcntl
+import signal
 
 from cryptobot.core.config import AppConfig
 from cryptobot.core.logging import get_logger, setup_logging
@@ -127,6 +128,25 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
     # Global runtime storage (singleton status)
     storage_path = cfg.monitor.storage_path if getattr(cfg, "monitor", None) else "~/.cryptobot/monitor.db"
     storage = StorageManager(storage_path)
+
+    # Handle termination signals for graceful shutdown (propagate via storage + local event)
+    signal_stop = threading.Event()
+    def _on_signal(signum, frame) -> None:  # type: ignore[no-untyped-def]
+        try:
+            log.info(f"Signal {signum} received — requesting graceful shutdown...")
+        except Exception:
+            pass
+        signal_stop.set()
+        try:
+            storage.request_runtime_stop()
+        except Exception:
+            pass
+    try:
+        signal.signal(signal.SIGTERM, _on_signal)
+        signal.signal(signal.SIGINT, _on_signal)
+    except Exception:
+        # Some environments disallow custom signal handlers; continue without them
+        pass
 
     # Note: We rely on a system-wide file lock as the single source of truth.
     # The heartbeat record is informative only and should never prevent startup
@@ -504,8 +524,16 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
         },
     }
     last_params_ts = 0.0
-    while not (stop_event and stop_event.is_set()):
+    while not ((stop_event and stop_event.is_set()) or signal_stop.is_set()):
         try:
+            # Honor OS signal-triggered stop immediately
+            if signal_stop.is_set():
+                try:
+                    log.info("Stop requested via OS signal. Shutting down gracefully...")
+                except Exception:
+                    pass
+                stop_requested = True
+                break
             # Honor remote stop requests (from shell/systemd)
             try:
                 rs = storage.get_runtime_status() or {}
@@ -1374,7 +1402,7 @@ def run_live(config_path: str, stop_event: Optional[threading.Event] = None) -> 
             # 7. Sleep (short sleep chunks to react faster to stop_event), and heartbeat periodically
             total_sleep = int(cfg.llm.decision_interval_sec)
             slept = 0.0
-            while slept < total_sleep and not (stop_event and stop_event.is_set()):
+            while slept < total_sleep and not ((stop_event and stop_event.is_set()) or signal_stop.is_set()):
                 # Keep heartbeat fresh without hammering the DB
                 if (slept % 2.0) < 1e-6:
                     try:
