@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from typing import Dict, Any, List
+from cryptobot.strategy.base import BaseStrategy
 
 
-class BreakoutStrategy:
+class BreakoutStrategy(BaseStrategy):
     """
     Stratégie de breakout : détecte les cassures de niveaux de support/résistance.
     
@@ -11,37 +12,27 @@ class BreakoutStrategy:
     de sentiment pour confirmer la direction du breakout.
     """
     
-    def __init__(self, broker) -> None:
-        self.broker = broker
-
     def detect_opportunities(self, context: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        Détecte les opportunités de breakout basées sur :
-        - Prix qui casse des niveaux (simplifié ici)
-        - Volume élevé (confirmation)
-        - Signaux de sentiment (Polymarket, Reddit, Twitter) pour confirmer la direction
-        - Market cap et volume global
+        Détecte les opportunités de breakout.
         """
-        prices: Dict[str, Dict[str, float]] = context.get("prices", {})
-        if not prices:
-            return []
+        data = self.parse_context(context)
+        symbol = data["symbol"]
+        mid = data["mid_price"]
         
-        symbol = next(iter(prices.keys()))
-        mid = float(prices[symbol].get("hyperliquid", 0.0))
-        if mid <= 0:
+        if not symbol or mid <= 0:
             return []
         
         # Signaux de sentiment
-        sentiment = context.get("sentiment", {})
-        reddit_score = float(sentiment.get("reddit", {}).get("score", 0.0))
-        twitter_score = float(sentiment.get("twitter", {}).get("score", 0.0))
-        polymarket_score = float(sentiment.get("polymarket", {}).get("score", 0.0))
+        sent = data["sentiment"]
+        reddit_score = sent["reddit"]
+        twitter_score = sent["twitter"]
+        polymarket_score = sent["polymarket"]
         
         # Volume (confirmation de breakout)
-        volumes = context.get("market", {}).get("volumes", {})
-        volume = float(volumes.get(symbol, 0.0))
+        volume = data["market"]["volume"]
         
-        # Market cap et volume global (signaux de qualité)
+        # Market cap et volume global (signaux de qualité) - conservé du code original mais non standardisé dans BaseStrategy pour l'instant
         market_data = context.get("market", {})
         market_cap = float(market_data.get("market_cap", {}).get(symbol, 0.0))
         total_volume_24h = float(market_data.get("total_volume_24h", {}).get(symbol, 0.0))
@@ -81,4 +72,3 @@ class BreakoutStrategy:
             },
             "breakout_type": "bullish" if direction == "long" else "bearish"
         }]
-

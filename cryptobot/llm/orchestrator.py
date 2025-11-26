@@ -359,10 +359,25 @@ class LLMOrchestrator:
             "risk": {
                 "min_hold_seconds": 20.0,
             },
+            "fast_path": {
+                "enabled": True,
+                "scalping_enabled": True,
+                "rsi_period": 14,
+                "rsi_overbought": 70.0,
+                "rsi_oversold": 30.0,
+                "ema_fast": 9,
+                "ema_slow": 21,
+                "max_leverage": 5,
+                "max_positions": 3,
+                "stop_loss_pct": 0.01,
+                "take_profit_pct": 0.015,
+            }
         }
         try:
             mm = llm_response.get("market_making", {}) if isinstance(llm_response, dict) else {}
             rk = llm_response.get("risk", {}) if isinstance(llm_response, dict) else {}
+            fp = llm_response.get("fast_path", {}) if isinstance(llm_response, dict) else {}
+            
             def clamp(v, lo, hi, dv):
                 try:
                     x = float(v)
@@ -371,12 +386,27 @@ class LLMOrchestrator:
                     return max(lo, min(hi, x))
                 except Exception:
                     return dv
+
             out["market_making"]["edge_margin_bps"] = clamp(mm.get("edge_margin_bps"), 0.5, 10.0, out["market_making"]["edge_margin_bps"])
             out["market_making"]["k_vol"] = clamp(mm.get("k_vol"), 0.0, 3.0, out["market_making"]["k_vol"])
             out["market_making"]["passive_order_fraction_of_alloc"] = clamp(mm.get("passive_order_fraction_of_alloc"), 0.0, 0.2, out["market_making"]["passive_order_fraction_of_alloc"])
             out["market_making"]["passive_order_usd_cap"] = clamp(mm.get("passive_order_usd_cap"), 0.0, 2000.0, out["market_making"]["passive_order_usd_cap"])
             out["market_making"]["passive_order_min_usd"] = clamp(mm.get("passive_order_min_usd"), 0.0, 250.0, out["market_making"]["passive_order_min_usd"])
             out["risk"]["min_hold_seconds"] = clamp(rk.get("min_hold_seconds"), 5.0, 120.0, out["risk"]["min_hold_seconds"])
+            
+            # Fast Path parsing
+            out["fast_path"]["enabled"] = bool(fp.get("enabled", True))
+            out["fast_path"]["scalping_enabled"] = bool(fp.get("scalping_enabled", True))
+            out["fast_path"]["rsi_period"] = int(clamp(fp.get("rsi_period"), 7, 21, 14))
+            out["fast_path"]["rsi_overbought"] = clamp(fp.get("rsi_overbought"), 60.0, 85.0, 70.0)
+            out["fast_path"]["rsi_oversold"] = clamp(fp.get("rsi_oversold"), 15.0, 40.0, 30.0)
+            out["fast_path"]["ema_fast"] = int(clamp(fp.get("ema_fast"), 5, 20, 9))
+            out["fast_path"]["ema_slow"] = int(clamp(fp.get("ema_slow"), 15, 50, 21))
+            out["fast_path"]["max_leverage"] = int(clamp(fp.get("max_leverage"), 1, 10, 5))
+            out["fast_path"]["max_positions"] = int(clamp(fp.get("max_positions"), 1, 5, 3))
+            out["fast_path"]["stop_loss_pct"] = clamp(fp.get("stop_loss_pct"), 0.002, 0.05, 0.01)
+            out["fast_path"]["take_profit_pct"] = clamp(fp.get("take_profit_pct"), 0.003, 0.10, 0.015)
+
         except Exception:
             pass
         return out

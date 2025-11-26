@@ -1,76 +1,88 @@
 from __future__ import annotations
 
-from typing import Dict, Any, List
+from typing import Dict, Any, Optional, List
+from dataclasses import dataclass
 
+@dataclass
+class StrategyParams:
+    # Default params, can be updated by FastEngine
+    min_obi: float = 0.3
+    depth_levels: int = 5
 
 class ScalpingStrategy:
     """
-    Stratégie de scalping : trades fréquents avec profits faibles mais réguliers.
-    
-    Principe : Entrer et sortir rapidement (minutes) pour capturer de petits mouvements.
-    Utilise les signaux (sentiment, volume, funding rates) pour évaluer la confiance.
+    HFT Microstructure Strategy (Order Book Imbalance).
+    Replaces old sentiment-based scalping for sub-millisecond reaction.
     """
-    
-    def __init__(self, broker) -> None:
-        self.broker = broker
+    def __init__(self):
+        self.params = StrategyParams()
 
-    def detect_opportunities(self, context: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def update_market_data(self, coin: str, mid: float, ts: float):
+        # Legacy/Info update - not used in HFT path
+        pass
+
+    def process_tick(self, symbol: str, book_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        Détecte les opportunités de scalping basées sur :
-        - Volatilité à court terme
-        - Volume élevé
-        - Signaux de sentiment (Reddit, Twitter, Polymarket)
-        - Funding rates
+        Process L2 Book update immediately.
+        Returns signal dict if opportunity found, else None.
         """
-        prices: Dict[str, Dict[str, float]] = context.get("prices", {})
-        if not prices:
-            return []
+        levels = book_data.get("levels")
+        if not levels or len(levels) < 2:
+            return None
+            
+        bids = levels[0]
+        asks = levels[1]
         
-        symbol = next(iter(prices.keys()))
-        mid = float(prices[symbol].get("hyperliquid", 0.0))
-        if mid <= 0:
-            return []
+        if not bids or not asks:
+            return None
+            
+        # Calculate Order Book Imbalance (OBI)
+        # OBI = (BidVol - AskVol) / (BidVol + AskVol)
+        # Use top N levels to gauge immediate pressure
         
-        # Signaux de sentiment (Reddit, Twitter, Polymarket)
-        sentiment = context.get("sentiment", {})
-        reddit_score = float(sentiment.get("reddit", {}).get("score", 0.0))
-        twitter_score = float(sentiment.get("twitter", {}).get("score", 0.0))
-        polymarket_score = float(sentiment.get("polymarket", {}).get("score", 0.0))
+        depth = getattr(self.params, 'depth_levels', 5)
         
-        # Volume (signal de liquidité)
-        volumes = context.get("market", {}).get("volumes", {})
-        volume = float(volumes.get(symbol, 0.0))
+        bid_vol = 0.0
+        ask_vol = 0.0
         
-        # Funding rate (signal de sentiment des traders)
-        funding_rates = context.get("market", {}).get("funding_rates", {})
-        funding_rate = float(funding_rates.get(symbol, 0.0))
+        # Hyperliquid L2 levels are dicts: {'px': '...', 'sz': '...', 'n': ...}
+        for i in range(min(len(bids), depth)):
+            bid_vol += float(bids[i]['sz'])
+            
+        for i in range(min(len(asks), depth)):
+            ask_vol += float(asks[i]['sz'])
+            
+        if (bid_vol + ask_vol) == 0:
+            return None
+            
+        obi = (bid_vol - ask_vol) / (bid_vol + ask_vol)
         
-        # Score de scalping combiné
-        # Polymarket a plus de poids (argent réel)
-        signal_strength = (
-            reddit_score * 0.2 +
-            twitter_score * 0.2 +
-            polymarket_score * 0.4 +  # Plus de poids car argent réel
-            (1.0 if volume > 0 else 0.0) * 0.1 +
-            (1.0 if abs(funding_rate) > 0.0001 else 0.0) * 0.1
-        )
+        # Mid price for limit placement
+        best_bid = float(bids[0]['px'])
+        best_ask = float(asks[0]['px'])
+        mid_price = (best_bid + best_ask) / 2.0
         
-        direction = "long" if signal_strength > 0.1 else "short" if signal_strength < -0.1 else "flat"
+        # Threshold from params (FastEngine updates this)
+        threshold = getattr(self.params, 'min_obi', 0.3)
         
-        if direction == "flat":
-            return []
-        
-        return [{
-            "symbol": symbol,
-            "price": mid,
-            "direction": direction,
-            "signal_strength": signal_strength,
-            "volume": volume,
-            "funding_rate": funding_rate,
-            "sentiment_scores": {
-                "reddit": reddit_score,
-                "twitter": twitter_score,
-                "polymarket": polymarket_score,
+        direction = "flat"
+        if obi > threshold:
+            direction = "long"
+            # Place limit at best bid to be maker, or cross if urgent?
+            # For HFT scalping, usually want to join the bid.
+            price = best_bid 
+        elif obi < -threshold:
+            direction = "short"
+            price = best_ask
+            
+        if direction != "flat":
+            return {
+                "symbol": symbol,
+                "direction": direction,
+                "price": price,
+                "is_maker": True,
+                "obi": obi,
+                "timestamp": book_data.get("time")
             }
-        }]
-
+            
+        return None

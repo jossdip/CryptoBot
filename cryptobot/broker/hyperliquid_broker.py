@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Literal, Any
+from typing import Dict, Optional, Literal, Any, Callable, Awaitable
+import asyncio
+import json
+
+try:
+    import websockets
+except ImportError:
+    websockets = None
+
 
 import os
 import time
@@ -1025,5 +1033,110 @@ class HyperliquidBroker:
             return 0.0
         except Exception:  # pragma: no cover - SDK runtime path
             return 0.0
+
+    async def place_order_async(
+        self,
+        symbol: str,
+        side: Literal["buy", "sell"],
+        size: float,
+        leverage: int = 5,
+        order_type: Literal["market", "limit"] = "market",
+        price: Optional[float] = None,
+        stop_loss: Optional[float] = None,
+        take_profit: Optional[float] = None,
+        client_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Async wrapper for place_order."""
+        return await asyncio.to_thread(
+            self.place_order,
+            symbol=symbol,
+            side=side,
+            size=size,
+            leverage=leverage,
+            order_type=order_type,
+            price=price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            client_id=client_id,
+        )
+
+    async def get_portfolio_async(self) -> Dict[str, Any]:
+        """Async wrapper for get_portfolio."""
+        return await asyncio.to_thread(self.get_portfolio)
+
+    async def close_all_positions_async(self) -> Dict[str, Any]:
+        """Async wrapper for close_all_positions."""
+        return await asyncio.to_thread(self.close_all_positions)
+
+    async def place_bracket_orders_async(
+        self,
+        *,
+        symbol: str,
+        direction: Literal["long", "short"],
+        size: float,
+        entry_price: float,
+        tp_pct: Optional[float],
+        sl_pct: Optional[float],
+    ) -> Dict[str, Any]:
+        """Async wrapper for place_bracket_orders."""
+        return await asyncio.to_thread(
+            self.place_bracket_orders,
+            symbol=symbol,
+            direction=direction,
+            size=size,
+            entry_price=entry_price,
+            tp_pct=tp_pct,
+            sl_pct=sl_pct,
+        )
+
+    async def get_funding_rate_async(self, symbol: str) -> float:
+        """Async wrapper for get_funding_rate."""
+        return await asyncio.to_thread(self.get_funding_rate, symbol)
+
+    async def listen_market_updates(self, symbols: list[str], callback: Callable[[Dict], Awaitable[None]]):
+        """
+        Listen to L2 Book updates via Websocket.
+        This is a simplified implementation connecting to Hyperliquid WSS.
+        """
+        if websockets is None:
+            log.error("websockets package not installed, cannot listen_market_updates")
+            return
+
+        # Decide WS URL based on testnet
+        ws_url = "wss://api.hyperliquid-testnet.xyz/ws" if self.conn.testnet else "wss://api.hyperliquid.xyz/ws"
+        
+        log.info(f"Connecting to WS: {ws_url} for {len(symbols)} symbols")
+        
+        while True:
+            try:
+                async with websockets.connect(ws_url) as ws:
+                    # Subscribe to L2 book for all symbols
+                    subs = []
+                    
+                    # Hyperliquid expects: { "method": "subscribe", "subscription": { "type": "l2Book", "coin": "BTC" } }
+                    for sym in symbols:
+                        hl_sym = self._normalize_symbol_for_hyperliquid(sym)
+                        msg = {"method": "subscribe", "subscription": {"type": "l2Book", "coin": hl_sym}}
+                        await ws.send(json.dumps(msg))
+                        # Also subscribe to trades for volume/momentum?
+                        msg_trades = {"method": "subscribe", "subscription": {"type": "trades", "coin": hl_sym}}
+                        await ws.send(json.dumps(msg_trades))
+                        
+                    log.info("WS Subscribed. Listening...")
+                    
+                    async for msg in ws:
+                        data = json.loads(msg)
+                        # Check for pong/subscription confirmation?
+                        if "channel" in data:
+                             await callback(data)
+                        elif "data" in data:
+                             await callback(data)
+                        
+            except asyncio.CancelledError:
+                log.info("WS listener cancelled")
+                break
+            except Exception as e:
+                log.error(f"WS connection error: {e}. Reconnecting in 5s...")
+                await asyncio.sleep(5)
 
 

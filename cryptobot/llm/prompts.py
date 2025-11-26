@@ -195,8 +195,21 @@ Context:
 - Portfolio state: {portfolio_state}
 - Performance metrics: {performance_metrics}
 
-Tune ONLY these parameters (return numeric values within safe ranges):
+Tune ONLY these parameters (return numeric/boolean values within safe ranges):
 {{
+  "fast_path": {{
+    "enabled": true/false,                       // Enable Fast Path execution engine
+    "scalping_enabled": true/false,              // Enable technical scalping strategy
+    "rsi_period": 7..21,                         // RSI period (default 14)
+    "rsi_overbought": 60.0..85.0,                // RSI overbought threshold
+    "rsi_oversold": 15.0..40.0,                  // RSI oversold threshold
+    "ema_fast": 5..20,                           // Fast EMA window
+    "ema_slow": 15..50,                          // Slow EMA window
+    "max_leverage": 1..10,                       // Max leverage for fast path
+    "max_positions": 1..5,                       // Max concurrent positions
+    "stop_loss_pct": 0.002..0.05,                // SL percentage
+    "take_profit_pct": 0.003..0.10               // TP percentage
+  }},
   "market_making": {{
     "edge_margin_bps": 0.5..10.0,               // extra bps over 2*fees to require for maker fallback
     "k_vol": 0.0..3.0,                           // multiplier on volatility added to required spread
@@ -212,6 +225,9 @@ Tune ONLY these parameters (return numeric values within safe ranges):
 Constraints and objectives:
 - PNL-first: Require sufficient net edge after fees and noise. Increase edge_margin_bps and/or k_vol when market is choppy.
 - Liquidity-aware: Scale passive_order_fraction_of_alloc and caps with liquidity/volatility.
-- Risk control: Increase min_hold_seconds when noise is high; decrease when momentum is clean.
-- Output STRICT JSON with numbers only (no strings), all fields present.
+- Fast Path Tuning:
+    - In high volatility, widen RSI bands (e.g., 80/20) and tighten stops.
+    - In trending markets, use standard RSI (70/30) and wider trailing stops.
+    - Disable fast path if market conditions are too erratic or data is stale.
+- Output STRICT JSON with numbers/booleans only, all fields present.
 """
