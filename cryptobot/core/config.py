@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 import yaml
 from pydantic import BaseModel, Field, PositiveFloat
@@ -39,24 +40,22 @@ class BrokerConfig(BaseModel):
 
 
 class RiskConfig(BaseModel):
-    max_position_pct: float = 0.2
+    max_position_pct: float = 0.25
     max_daily_drawdown_pct: float = 5.0
+    max_leverage: int = 50  # Default updated for aggressive mode compatibility
+
 
 
 class StrategyConfig(BaseModel):
     name: str = "nof1_baseline"
-    params: Dict[str, float] = Field(default_factory=dict)
-
-
-class EnsembleConfig(BaseModel):
-    weights: Dict[str, float] = Field(default_factory=dict)
-    llm_overlay: Dict[str, Optional[bool]] = Field(default_factory=lambda: {"enabled": False})
+    params: Dict[str, Any] = Field(default_factory=dict)
 
 
 class HyperliquidConfig(BaseModel):
     testnet: bool = True
     wallet_address: str = ""
-    private_key: str = ""
+    # Private Key must be loaded from env, never default.
+    private_key: str = Field(default_factory=lambda: os.getenv("HYPERLIQUID_PRIVATE_KEY", ""))
     default_leverage: int = 10
     max_leverage: int = 50
     margin_mode: str = "isolated"
@@ -81,27 +80,9 @@ class LLMConfig(BaseModel):
 class StrategyWeightsConfig(BaseModel):
     initial_weights: Dict[str, float] = Field(
         default_factory=lambda: {
-            "market_making": 0.35,  # Base stable, #1 strategy
-            "momentum": 0.25,  # Follow trends, #2 strategy
-            "scalping": 0.15,  # Frequent trades, #3 strategy
-            "arbitrage": 0.12,  # Safe but limited, #4 strategy
-            "breakout": 0.08,  # Less frequent but big moves, #5 strategy
-            "sniping": 0.05,  # Very risky, limit exposure, #6 strategy
+            "sniping": 0.30, 
         }
     )
-
-
-class SentimentSubConfig(BaseModel):
-    enabled: bool = False
-    subreddits: List[str] = Field(default_factory=list)
-    keywords: List[str] = Field(default_factory=list)
-    check_interval_sec: int = 300
-
-
-class SentimentConfig(BaseModel):
-    reddit: SentimentSubConfig = Field(default_factory=SentimentSubConfig)
-    twitter: SentimentSubConfig = Field(default_factory=SentimentSubConfig)
-    polymarket: SentimentSubConfig = Field(default_factory=SentimentSubConfig)
 
 
 class BacktestReportConfig(BaseModel):
@@ -159,9 +140,6 @@ class LearningBanditsConfig(BaseModel):
                 "sl_grid_pct": [0.004, 0.005, 0.006, 0.008, 0.010],
                 "min_conf_grid": [0.50, 0.55, 0.60, 0.65, 0.70],
             },
-            "momentum": {"leverage_grid": [6, 10, 14, 18, 20]},
-            "breakout": {"leverage_grid": [6, 10, 14, 18, 20]},
-            "scalping": {"leverage_grid": [4, 8, 10, 12]},
             "sniping": {"leverage_grid": [8, 12, 16, 20, 25]},
         }
     )
@@ -198,13 +176,11 @@ class AppConfig(BaseModel):
     broker: BrokerConfig
     risk: RiskConfig
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
-    ensemble: EnsembleConfig = Field(default_factory=EnsembleConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     # Optional sections for Hyperliquid/LLM live trading
     hyperliquid: HyperliquidConfig = Field(default_factory=HyperliquidConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     strategy_weights: StrategyWeightsConfig = Field(default_factory=StrategyWeightsConfig)
-    sentiment: SentimentConfig = Field(default_factory=SentimentConfig)
     cli: CLIConfig = Field(default_factory=CLIConfig)
     monitor: MonitorConfig = Field(default_factory=MonitorConfig)
     learning: LearningConfig = Field(default_factory=LearningConfig)

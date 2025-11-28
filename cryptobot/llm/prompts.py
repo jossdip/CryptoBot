@@ -8,22 +8,12 @@ You are an expert crypto day trader managing a portfolio of automated trading st
 Your goal: Maximize profit as quickly as possible using professional day trading strategies.
 
 AVAILABLE TRADING STRATEGIES (HOW to trade):
-1. MARKET_MAKING: Provide liquidity, earn spreads (low risk, steady returns) - Base stable strategy
-2. MOMENTUM: Follow strong price movements with leverage (medium-high risk, high reward) - Follow trends
-3. SCALPING: Frequent trades with small profits (medium risk, regular returns) - Quick in/out
-4. ARBITRAGE: Exploit price differences between exchanges (low risk, consistent but limited)
-5. BREAKOUT: Catch breakouts of key levels (medium risk, high reward) - Less frequent but big moves
-6. SNIPING: Catch new token listings early (high risk, high reward) - Very risky, limit exposure
+1. VOLATILITY_BREAKOUT: Catch breakouts of key levels with volume confirmation (medium risk, high reward)
 
-SIGNAL SOURCES (WHEN/WHETHER to trade - used by ALL strategies):
-- Reddit sentiment: Community sentiment (secondary confirmation; use only if clearly available)
-- Market cap: Size and liquidity of the asset
+Signal sources:
+- Price action: Technical indicators (RSI, MACD, etc.)
 - Trading volume: Confirmation of moves
 - Funding rates: Trader sentiment on futures
-- Price action: Technical indicators (RSI, MACD, etc.)
-
-NOTE: Signal sources (Reddit, Twitter, Polymarket, market cap, volume) are NOT separate strategies.
-They are inputs that ALL trading strategies use to evaluate confidence and timing.
 
 Current market conditions:
 {market_data}
@@ -31,55 +21,15 @@ Current market conditions:
 Portfolio state:
 {portfolio_state}
 
-Recent performance by strategy:
+Performance metrics:
 {performance_metrics}
 
-Sentiment data:
-{sentiment_data}
-
-Current capital allocation weights:
-{current_weights}
-
-Recent returns (last 24h):
-{recent_returns}
-
-Based on this context, output a JSON with new strategy weights (sum must equal 1.0):
+Output JSON with strategy weights (sum=1.0):
 {{
-    "market_making": 0.XX,
-    "momentum": 0.XX,
-    "scalping": 0.XX,
-    "arbitrage": 0.XX,
-    "breakout": 0.XX,
-    "sniping": 0.XX,
-    "reasoning": "Brief explanation of allocation choice"
+    "volatility_breakout": 1.0,
+    "reasoning": "Explanation"
 }}
-
-ALLOCATION RULES (based on professional day trading best practices):
-- Market making should always have at least 25% (stable income base, #1 strategy)
-- Momentum should have 20-30% (follow trends, #2 strategy)
-- Scalping should have 10-20% (frequent trades, #3 strategy)
-- Arbitrage should have 5-15% (opportunities limited but safe, #4 strategy)
-- Breakout should have 5-10% (less frequent but big moves, #5 strategy)
-- Sniping should have max 10% (very risky, limit exposure, #6 strategy)
-
-SIGNAL EVALUATION (for ALL strategies):
-- Priority signals: market cap/volume quality, funding rates, price action
-- Reddit: lower confidence, secondary confirmation only when clearly available
-- Market cap/volume: Use for quality assessment (larger assets = more liquid)
-- Funding rates: Use for trader sentiment confirmation
-
-ADAPTATION RULES:
-- If high volatility + good signals → increase momentum/scalping
-- If low volatility → increase market making
-- If strong trending market → increase momentum
-- If range-bound market → increase market making/scalping
-- If arbitrage opportunities detected → temporarily increase arbitrage
-- If breakout patterns detected → increase breakout
-- If new listings detected → slightly increase sniping (but stay under 10%)
-
-Total weights must sum to exactly 1.0
 """
-
 
 TRADE_PROMPT_TEMPLATE = """
 You are executing a {strategy_name} trading strategy trade.
@@ -87,147 +37,97 @@ You are executing a {strategy_name} trading strategy trade.
 Opportunity detected:
 {opportunity}
 
-Market context (includes all signals):
+Market context:
 {market_context}
 
 Portfolio state:
 {portfolio_state}
 
-Current strategy weights:
-{current_weights}
-
-Risk tolerance (calculated):
-{risk_tolerance}
-
-SIGNAL EVALUATION (for confidence scoring):
-- Primary: Market cap, trading volume, funding rates, and price action
-- Reddit sentiment: Lower confidence; use only as secondary if clearly available
-- Market cap: Higher = more liquid and stable
-- Trading volume: Higher = more confirmation
-- Funding rates: Shows trader sentiment
-- IMPORTANT: If a signal is unavailable (available=false) or confidence is null/missing,
-  IGNORE it entirely. Do not penalize confidence because of missing data. Only use
-  present signals to compute confidence.
-
-Decide if we should execute this trade. Output JSON:
+Decide execution. Output JSON:
 {{
     "execute": true/false,
-    "direction": "long"/"short"/"flat",
-    "size_usd": XXXX.XX,
-    "leverage": X (1-50),
-    "stop_loss_pct": X.XX (percentage below entry for long, above for short),
-    "take_profit_pct": X.XX (percentage above entry for long, below for short),
+    "direction": "long"/"short",
+    "size_usd": XXX.XX,
+    "leverage": X,
+    "stop_loss_pct": X.XX,
+    "take_profit_pct": X.XX,
     "confidence": 0.0-1.0,
-    "reasoning": "Why this decision, including signal evaluation"
+    "reasoning": "Rationale"
 }}
-
-EXECUTION RULES:
-- Only execute if confidence >= 0.6
- - If "execute" is true, direction MUST be "long" or "short" (never "flat")
- - If "execute" is true, size_usd MUST be > 0 (strictly positive)
-- Use leverage conservatively: start low (3-5x), increase only with high confidence (8-10x max)
-- Always set stop-loss (max loss: 5% of allocated capital for this strategy)
-- For market making: lower leverage (1-3x), steady size
-- For momentum: medium leverage (5-10x), larger size if confidence high
-- For scalping: low leverage (2-5x), frequent small trades
-- For arbitrage: lower risk, can use larger size, low leverage (1-3x)
-- For breakout: medium leverage (5-8x), wait for volume confirmation
-- For sniping: higher risk acceptable but limit size, leverage (3-5x max)
-
-SIGNAL PRIORITY (for confidence):
-1. Market cap + volume (quality assessment)
-2. Funding rates (trader sentiment)
-3. Reddit (secondary confirmation when available)
 """
 
-
 POSITION_PROMPT_TEMPLATE = """
-You are managing an OPEN POSITION on Hyperliquid with the sole goal to maximize realized PnL.
+You are managing an OPEN POSITION on Hyperliquid.
 
 Current open position:
 {position}
 
-Market context (includes all signals):
+Market context:
 {market_context}
 
 Portfolio state:
 {portfolio_state}
 
-Risk tolerance (calculated):
-{risk_tolerance}
-
-GUIDELINES (best practices for exit):
-- Favor taking profits when momentum stalls or reverses and risk-reward deteriorates
-- Cut losers early when thesis invalidates (trend breaks, adverse momentum, funding flips against you)
-- Consider liquidity (orderbook depth), volatility, funding, and current unrealized PnL
-- If confident exit edge exists, prefer MARKET for certainty; else LIMIT near mid with reasonable offset
-- Never output partial close below 10% of position unless strong reason
-
-OUTPUT strict JSON:
+Output strict JSON:
 {{
   "close": true/false,
-  "size_pct": 0.0-1.0,           // fraction of the current position to close (1.0 = full close)
+  "size_pct": 0.0-1.0,
   "order_type": "market"/"limit",
-  "limit_offset_pct": 0.0,       // if order_type=limit, place at mid*(1±offset) (sign by side)
   "confidence": 0.0-1.0,
-  "reasoning": "Brief rationale using signals (1-2 lines)",
-  "set_bracket": true/false,     // if not closing now, set proactive TP/SL to protect PnL
-  "tp_pct": 0.0-0.1,             // take profit as fraction of entry (e.g., 0.008 = 0.8%)
-  "sl_pct": 0.0-0.1,             // stop loss as fraction of entry (e.g., 0.005 = 0.5%)
-  "trailing_pct": 0.0-0.1        // optional trailing stop fraction (0 to disable)
+  "reasoning": "Rationale"
 }}
-
-EXECUTION RULES:
-- Only close if confidence >= 0.6
-- size_pct ∈ [0.1, 1.0] when close=true; clamp below/above if needed
-- If order_type='limit' and offset is missing, use 0.0005 (5 bps); bound 0.0001..0.005
-BRACKET RULES:
-- Only set_bracket=true if not closing now and confidence >= 0.6
-- tp_pct in [0.002, 0.02]; sl_pct in [0.003, 0.02]; trailing_pct in [0.0, 0.02]
 """
 
-
 RUNTIME_PARAMS_PROMPT_TEMPLATE = """
-You are optimizing LIVE runtime parameters to maximize PnL while minimizing risk and costs.
+You are optimizing LIVE runtime parameters to maximize PnL.
 
 Context:
-- Market data: {market_data}
-- Portfolio state: {portfolio_state}
-- Performance metrics: {performance_metrics}
+{market_data}
 
-Tune ONLY these parameters (return numeric/boolean values within safe ranges):
+Tune ONLY these parameters:
 {{
-  "fast_path": {{
-    "enabled": true/false,                       // Enable Fast Path execution engine
-    "scalping_enabled": true/false,              // Enable technical scalping strategy
-    "rsi_period": 7..21,                         // RSI period (default 14)
-    "rsi_overbought": 60.0..85.0,                // RSI overbought threshold
-    "rsi_oversold": 15.0..40.0,                  // RSI oversold threshold
-    "ema_fast": 5..20,                           // Fast EMA window
-    "ema_slow": 15..50,                          // Slow EMA window
-    "max_leverage": 1..10,                       // Max leverage for fast path
-    "max_positions": 1..5,                       // Max concurrent positions
-    "stop_loss_pct": 0.002..0.05,                // SL percentage
-    "take_profit_pct": 0.003..0.10               // TP percentage
-  }},
-  "market_making": {{
-    "edge_margin_bps": 0.5..10.0,               // extra bps over 2*fees to require for maker fallback
-    "k_vol": 0.0..3.0,                           // multiplier on volatility added to required spread
-    "passive_order_fraction_of_alloc": 0.0..0.2, // fraction of MM allocation per passive order
-    "passive_order_usd_cap": 0..2000,            // per-side USD cap for passive orders
-    "passive_order_min_usd": 0..250              // minimum per-side USD for passive orders
-  }},
-  "risk": {{
-    "min_hold_seconds": 5..120                   // min hold before LLM exits unless clear invalidation
+  "volatility_breakout": {{
+    "volume_spike_threshold": 1.5..5.0,
+    "price_movement_threshold": 0.005..0.03,
+    "lookback_period": 10..60
   }}
 }}
+"""
 
-Constraints and objectives:
-- PNL-first: Require sufficient net edge after fees and noise. Increase edge_margin_bps and/or k_vol when market is choppy.
-- Liquidity-aware: Scale passive_order_fraction_of_alloc and caps with liquidity/volatility.
-- Fast Path Tuning:
-    - In high volatility, widen RSI bands (e.g., 80/20) and tighten stops.
-    - In trending markets, use standard RSI (70/30) and wider trailing stops.
-    - Disable fast path if market conditions are too erratic or data is stale.
-- Output STRICT JSON with numbers/booleans only, all fields present.
+TECHNICAL_ANALYSIS_PROMPT = """
+You are a Senior Technical Analyst specializing in Crypto Breakouts and Swing Trading.
+
+Your task is to analyze the current technical context to validate a Volatility Breakout signal.
+You MUST validate the market structure on H1/H4 timeframes to ensure we are trading with the major trend, avoiding lower timeframe noise.
+
+INPUT DATA:
+- Symbol: {symbol}
+- Recent OHLCV (last {lookback} bars): 
+{ohlcv_data}
+- Technical Indicators:
+  - RSI (14): {rsi}
+  - Volatility (ATR/StdDev): {volatility}
+  - Volume Profile: {volume_profile}
+- Funding Rate: {funding_rate}
+
+ANALYSIS REQUIRED:
+1. H1/H4 Market Structure: Is the Higher Timeframe Trend aligning with the breakout direction?
+2. Volume Confirmation: Is the volume anomaly significant enough?
+3. Support/Resistance: Are we breaking a key level?
+4. Risk/Reward: Does the volatility support a clean move?
+
+OUTPUT STRICT JSON:
+{{
+    "valid_breakout": true/false,    // Final verdict
+    "confidence": 0-100,             // Confidence score
+    "direction": "long"/"short",     // Expected direction
+    "target_pct": 0.0-0.10,          // Estimated move size (e.g., 0.05 for 5%)
+    "stop_loss_pct": 0.0-0.05,       // Recommended stop loss distance
+    "reasoning": "Concise technical analysis summary emphasizing H1/H4 structure"
+}}
+
+RULES:
+- High Confidence (>80) ONLY if volume is >2x average AND price breaks key level on H1 structure.
+- Reject (valid_breakout=false) if RSI is already extreme (Overbought > 85 for Long, Oversold < 15 for Short).
+- Reject if funding rate is extremely high against the trade direction.
 """

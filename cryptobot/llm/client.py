@@ -10,19 +10,17 @@ from collections import defaultdict
 import httpx
 from loguru import logger as log
 from cryptobot.core.logging import get_llm_logger
+from cryptobot.llm.prompts import TECHNICAL_ANALYSIS_PROMPT
 
-
-# DeepSeek pricing (2024) - DeepSeek-V3 (Chat)
-# Input: $0.07 per million tokens (cache hit), $0.27 per million (cache miss)
-# Output: $1.10 per million tokens
-DEEPSEEK_INPUT_COST_HIT = 0.07 / 1_000_000  # $0.07 per million
-DEEPSEEK_INPUT_COST_MISS = 0.27 / 1_000_000  # $0.27 per million
-DEEPSEEK_OUTPUT_COST = 1.10 / 1_000_000  # $1.10 per million
+# DeepSeek pricing (2024)
+DEEPSEEK_INPUT_COST_HIT = 0.07 / 1_000_000
+DEEPSEEK_INPUT_COST_MISS = 0.27 / 1_000_000
+DEEPSEEK_OUTPUT_COST = 1.10 / 1_000_000
 
 
 @dataclass
 class LLMCostTracker:
-    """Track LLM API costs for monitoring and optimization."""
+    """Track LLM API costs."""
     total_calls: int = 0
     total_tokens_input: int = 0
     total_tokens_output: int = 0
@@ -33,20 +31,12 @@ class LLMCostTracker:
     costs_by_type: Dict[str, float] = field(default_factory=lambda: defaultdict(float))
     start_time: float = field(default_factory=time.time)
 
-    def record_call(
-        self,
-        call_type: str,
-        tokens_input: int,
-        tokens_output: int,
-        from_cache: bool = False,
-    ) -> None:
-        """Record a single LLM API call."""
+    def record_call(self, call_type: str, tokens_input: int, tokens_output: int, from_cache: bool = False) -> None:
         self.total_calls += 1
         self.total_tokens_input += tokens_input
         self.total_tokens_output += tokens_output
         self.calls_by_type[call_type] += 1
 
-        # Calculate cost
         if from_cache:
             input_cost = tokens_input * DEEPSEEK_INPUT_COST_HIT
             self.cache_hits += 1
@@ -54,30 +44,18 @@ class LLMCostTracker:
             input_cost = tokens_input * DEEPSEEK_INPUT_COST_MISS
             self.cache_misses += 1
         output_cost = tokens_output * DEEPSEEK_OUTPUT_COST
-        call_cost = input_cost + output_cost
-
-        self.total_cost += call_cost
-        self.costs_by_type[call_type] += call_cost
+        self.total_cost += (input_cost + output_cost)
+        self.costs_by_type[call_type] += (input_cost + output_cost)
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get current cost statistics."""
         elapsed_hours = (time.time() - self.start_time) / 3600.0
         return {
             "total_calls": self.total_calls,
-            "total_tokens_input": self.total_tokens_input,
-            "total_tokens_output": self.total_tokens_output,
             "total_cost_usd": round(self.total_cost, 6),
-            "cache_hit_rate": round(self.cache_hits / max(1, self.total_calls), 3),
             "calls_per_hour": round(self.total_calls / max(0.001, elapsed_hours), 2),
-            "cost_per_hour": round(self.total_cost / max(0.001, elapsed_hours), 6),
-            "estimated_daily_cost": round(self.total_cost / max(0.001, elapsed_hours) * 24, 2),
-            "estimated_monthly_cost": round(self.total_cost / max(0.001, elapsed_hours) * 24 * 30, 2),
-            "calls_by_type": dict(self.calls_by_type),
-            "costs_by_type": {k: round(v, 6) for k, v in self.costs_by_type.items()},
         }
 
     def reset(self) -> None:
-        """Reset all counters."""
         self.total_calls = 0
         self.total_tokens_input = 0
         self.total_tokens_output = 0
@@ -104,130 +82,30 @@ class LLMClient:
         model = os.getenv("LLM_MODEL", "deepseek-chat")
         return cls(base_url=base_url, api_key=api_key, model=model)
 
-    def score_risk(self, context: Dict) -> float:
-        if not self.api_key:
-            return 1.0
-        prompt = (
-            "You are a crypto trading risk controller. Given the context, output a single number risk multiplier between 0.0 and 1.5.\n"
-            "Higher implies higher confidence to size up. Lower implies reduce size.\n"
-            f"Context: {context}\n"
-            "Output only the number."
-        )
-        try:
-            req_id = str(uuid.uuid4())
-            t0 = time.time()
-            with httpx.Client(timeout=15.0) as client:
-                resp = client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json={
-                        "model": self.model,
-                        "messages": [
-                            {"role": "system", "content": "You output only a number."},
-                            {"role": "user", "content": prompt},
-                        ],
-                        "temperature": 0.2,
-                        "max_tokens": 10,
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                content = data["choices"][0]["message"]["content"].strip()
-                latency_ms = int((time.time() - t0) * 1000)
-                usage = data.get("usage", {})
-                tokens_input = usage.get("prompt_tokens", int(len(prompt.split()) * 1.3))
-                tokens_output = usage.get("completion_tokens", 10)
-                est_cost = tokens_input * DEEPSEEK_INPUT_COST_MISS + tokens_output * DEEPSEEK_OUTPUT_COST
-                get_llm_logger().debug({
-                    "event": "llm_call_success",
-                    "req_id": req_id,
-                    "call": "score_risk",
-                    "model": self.model,
-                    "temperature": 0.2,
-                    "max_tokens": 10,
-                    "latency_ms": latency_ms,
-                    "tokens": {"input": tokens_input, "output": tokens_output},
-                    "estimated_cost_usd": round(est_cost, 8),
-                    "prompt": prompt,
-                    "response": content,
-                    "usage": usage,
-                })
-                # Track cost
-                self._cost_tracker.record_call("score_risk", int(tokens_input), int(tokens_output), from_cache=False)
-                return float(content)
-        except Exception:
-            return 1.0
-
-    def decide_futures(self, context: Dict) -> Dict:
-        """Return a decision dict: {direction: long|short|flat, leverage: int, confidence: float}.
-        Fallback: neutral decision with leverage 1.
+    def analyze_technical_context(self, symbol: str, ohlcv: str, rsi: float, volatility: float, volume_profile: str, funding_rate: float) -> Dict[str, Any]:
         """
-        # Cheap default when no key configured
+        Analyze technical context using LLM to validate breakout.
+        """
         if not self.api_key:
-            return {"direction": "flat", "leverage": 1, "confidence": 0.0}
-
-        prompt = (
-            "You are an expert crypto futures trader. Given recent OHLCV and context, "
-            "decide if the next action should be long, short, or flat (no position), and recommend leverage (1-20).\n"
-            "Rules: prefer cost efficiency (user only has ~20 USDT); avoid overtrading; use higher leverage only when volatility is low and trend strong.\n"
-            "Output strict JSON with keys: direction(one of 'long','short','flat'), leverage(integer 1..20), confidence(float 0..1). No extra text.\n"
-            f"Context: {context}\n"
+            return {"valid_breakout": False, "confidence": 0.0}
+        
+        prompt = TECHNICAL_ANALYSIS_PROMPT.format(
+            symbol=symbol,
+            lookback=len(ohlcv.splitlines()) if ohlcv else 0,
+            ohlcv_data=ohlcv,
+            rsi=rsi,
+            volatility=volatility,
+            volume_profile=volume_profile,
+            funding_rate=funding_rate
         )
-        try:
-            req_id = str(uuid.uuid4())
-            t0 = time.time()
-            with httpx.Client(timeout=20.0) as client:
-                resp = client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json={
-                        "model": self.model,
-                        "messages": [
-                            {"role": "system", "content": "Answer with only valid compact JSON."},
-                            {"role": "user", "content": prompt},
-                        ],
-                        "temperature": 0.2,
-                        "max_tokens": 64,
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                content = data["choices"][0]["message"]["content"].strip()
-                latency_ms = int((time.time() - t0) * 1000)
-                usage = data.get("usage", {})
-                tokens_input = usage.get("prompt_tokens", int(len(prompt.split()) * 1.3))
-                tokens_output = usage.get("completion_tokens", 64)
-                est_cost = tokens_input * DEEPSEEK_INPUT_COST_MISS + tokens_output * DEEPSEEK_OUTPUT_COST
-                get_llm_logger().debug({
-                    "event": "llm_call_success",
-                    "req_id": req_id,
-                    "call": "decide_futures",
-                    "model": self.model,
-                    "temperature": 0.2,
-                    "max_tokens": 64,
-                    "latency_ms": latency_ms,
-                    "tokens": {"input": tokens_input, "output": tokens_output},
-                    "estimated_cost_usd": round(est_cost, 8),
-                    "prompt": prompt,
-                    "response": content,
-                    "usage": usage,
-                })
-                # Track cost
-                self._cost_tracker.record_call("decide_futures", int(tokens_input), int(tokens_output), from_cache=False)
-                # Best-effort JSON extract
-                import json, re
-                m = re.search(r"\{[\s\S]*\}", content)
-                obj = json.loads(m.group(0) if m else content)
-                direction = str(obj.get("direction", "flat")).lower()
-                if direction not in {"long", "short", "flat"}:
-                    direction = "flat"
-                lev = int(obj.get("leverage", 1))
-                lev = max(1, min(20, lev))
-                conf = float(obj.get("confidence", 0.0))
-                conf = max(0.0, min(1.0, conf))
-                return {"direction": direction, "leverage": lev, "confidence": conf}
-        except Exception:
-            return {"direction": "flat", "leverage": 1, "confidence": 0.0}
+
+        return self.call(
+            prompt=prompt,
+            system_prompt="You are a strictly analytical technical trading assistant. Output JSON only.",
+            temperature=0.1, # Low temp for consistent analysis
+            max_tokens=256,
+            json_mode=True
+        )
 
     def call(
         self,
@@ -237,13 +115,6 @@ class LLMClient:
         max_tokens: int = 512,
         json_mode: bool = True,
     ) -> Dict[str, Any]:
-        """Generic LLM call with basic caching and retry.
-
-        - Caches responses by prompt content and key params
-        - Retries with exponential backoff on transient errors
-        - If json_mode, attempts to parse JSON robustly
-        """
-        # No key → behave deterministically
         if not self.api_key:
             return {}
 
@@ -257,26 +128,11 @@ class LLMClient:
             "system_prompt": system_prompt or "",
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "json_mode": json_mode,
             "model": self.model,
         }
         cache_key = hashlib.sha256(json.dumps(cache_key_src, sort_keys=True).encode("utf-8")).hexdigest()
         if cache_key in self._cache:
-            # Estimate tokens for cache hit (same as original call)
-            tokens_input = len(prompt.split()) * 1.3
-            tokens_output = max_tokens * 0.3  # Estimate average output
-            self._cost_tracker.record_call("call_cached", int(tokens_input), int(tokens_output), from_cache=True)
-            get_llm_logger().debug({
-                "event": "llm_cache_hit",
-                "call": "generic",
-                "model": self.model,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "json_mode": json_mode,
-                "tokens": {"input": int(tokens_input), "output": int(tokens_output)},
-                "estimated_cost_usd": round(tokens_input * DEEPSEEK_INPUT_COST_HIT + tokens_output * DEEPSEEK_OUTPUT_COST, 8),
-                "prompt": prompt,
-            })
+            self._cost_tracker.record_call("call_cached", 0, 0, from_cache=True)
             return self._cache[cache_key]
 
         messages = []
@@ -286,11 +142,8 @@ class LLMClient:
             messages.append({"role": "system", "content": "Respond with only strict JSON."})
         messages.append({"role": "user", "content": prompt})
 
-        last_err: Optional[Exception] = None
-        req_id = str(uuid.uuid4())
         for attempt in range(3):
             try:
-                t0 = time.time()
                 with httpx.Client(timeout=30.0) as client:
                     resp = client.post(
                         f"{self.base_url}/chat/completions",
@@ -305,30 +158,12 @@ class LLMClient:
                     resp.raise_for_status()
                     data = resp.json()
                     content = str(data["choices"][0]["message"]["content"]).strip()
-                    latency_ms = int((time.time() - t0) * 1000)
                     usage = data.get("usage", {})
-                    # Track cost
-                    tokens_input = usage.get("prompt_tokens", len(prompt.split()) * 1.3)
-                    tokens_output = usage.get("completion_tokens", max_tokens * 0.3)
-                    call_type = "call"  # Default, can be overridden by caller
-                    self._cost_tracker.record_call(call_type, int(tokens_input), int(tokens_output), from_cache=False)
-                    get_llm_logger().debug({
-                        "event": "llm_call_success",
-                        "req_id": req_id,
-                        "call": "generic",
-                        "model": self.model,
-                        "temperature": temperature,
-                        "max_tokens": max_tokens,
-                        "json_mode": json_mode,
-                        "latency_ms": latency_ms,
-                        "tokens": {"input": int(tokens_input), "output": int(tokens_output)},
-                        "estimated_cost_usd": round(tokens_input * DEEPSEEK_INPUT_COST_MISS + tokens_output * DEEPSEEK_OUTPUT_COST, 8),
-                        "system": system_prompt,
-                        "prompt": prompt,
-                        "response": content,
-                        "usage": usage,
-                        "attempt": attempt + 1,
-                    })
+                    tokens_input = usage.get("prompt_tokens", 0)
+                    tokens_output = usage.get("completion_tokens", 0)
+                    
+                    self._cost_tracker.record_call("generic", int(tokens_input), int(tokens_output), from_cache=False)
+                    
                     if json_mode:
                         m = re.search(r"\{[\s\S]*\}", content)
                         content = m.group(0) if m else content
@@ -337,16 +172,8 @@ class LLMClient:
                         obj = {"text": content}
                     self._cache[cache_key] = obj
                     return obj
-            except Exception as e:  # pragma: no cover - network path
-                last_err = e
-                get_llm_logger().debug({
-                    "event": "llm_call_error",
-                    "req_id": req_id,
-                    "call": "generic",
-                    "attempt": attempt + 1,
-                    "error": str(e)[:400],
-                })
-                _time.sleep(1.5 ** attempt)
+            except Exception as e:
+                log.warning(f"LLM call failed attempt {attempt+1}: {e}")
+                _time.sleep(1.0)
 
-        # On failure, return empty dict for json_mode
         return {}
