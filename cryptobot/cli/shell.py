@@ -69,7 +69,7 @@ class InteractiveShell:
         cfg = self.context.get("config")
         exchange = getattr(getattr(cfg, "general", None), "exchange_id", "hyperliquid") if cfg else "hyperliquid"
         completer = WordCompleter([
-            "start", "stop", "restart", "pause", "resume", "status", "ps", "pids", "enforce", "killdups", "monitor",
+            "tank start", "tank stop", "tank restart", "pause", "resume", "status", "ps", "pids", "enforce", "killdups", "monitor",
             "trades", "positions", "flatten", "performance", "portfolio", "strategies", "weights",
             "risk", "config", "logs", "help", "exit", "quit", "clear", "version",
         ], ignore_case=True)
@@ -165,14 +165,14 @@ class InteractiveShell:
             if cmd == "logs" or cmd == "l":
                 self._cmd_logs(args)
                 continue
-            if cmd == "start" or cmd == "s":
+            if cmd == "tank" and args and args[0] == "start":
                 self._start_trading()
                 continue
-            if cmd == "stop" or cmd == "st":
-                self._stop_trading(args)
+            if cmd == "tank" and args and args[0] == "stop":
+                self._stop_trading(args[1:])
                 continue
-            if cmd == "restart" or cmd == "re":
-                self._restart_trading(args)
+            if cmd == "tank" and args and args[0] == "restart":
+                self._restart_trading(args[1:])
                 continue
             if cmd == "pause" or cmd == "p":
                 # cooperative pause not implemented; placeholder
@@ -203,7 +203,7 @@ class InteractiveShell:
 
     def _print_help(self) -> None:
         self.console.print(
-            "Commands: start, stop [--force], restart [--force], pause, resume, status, ps/pids, enforce, monitor, trades, positions, flatten, performance, portfolio, strategies, weights, risk, config, logs, help, exit, clear, version"
+            "Commands: tank start, tank stop [--force], tank restart [--force], pause, resume, status, ps/pids, enforce, monitor, trades, positions, flatten, performance, portfolio, strategies, weights, risk, config, logs, help, exit, clear, version"
         )
 
     def _trading_target(self) -> None:
@@ -682,9 +682,8 @@ class InteractiveShell:
             latest = storage.latest_weights()
             if latest:
                 self.console.print("Runtime Weights:")
-                for k in ("market_making","momentum","scalping","arbitrage","breakout","sniping"):
-                    v = float(latest.get(k, 0.0))
-                    self.console.print(f"- {k}: {v:.2f}")
+                for k, v in latest.items():
+                    self.console.print(f"- {k}: {float(v):.2f}")
                 return
         except Exception:
             pass

@@ -4,19 +4,15 @@ from typing import Dict, List, Any, Optional, Tuple
 import os
 import math
 import statistics
+import pandas as pd
 
 from cryptobot.data.ccxt_live import fetch_mark_price
+from cryptobot.core.logging import get_logger
 
 # Import signal collectors (not strategies, but signal sources)
 try:
-    from cryptobot.strategy.sentiment_reddit import SentimentRedditStrategy
-    from cryptobot.strategy.sentiment_twitter import SentimentTwitterStrategy
-    from cryptobot.strategy.sentiment_polymarket import SentimentPolymarketStrategy
     from cryptobot.llm.client import LLMClient
 except ImportError:
-    SentimentRedditStrategy = None  # type: ignore
-    SentimentTwitterStrategy = None  # type: ignore
-    SentimentPolymarketStrategy = None  # type: ignore
     LLMClient = None  # type: ignore
 
 
@@ -26,14 +22,9 @@ class MarketContextAggregator:
         self.llm_client = llm_client
         self.config = config
         # Initialize signal collectors (not trading strategies, but signal sources)
-        if llm_client and LLMClient:
-            self.reddit_collector = SentimentRedditStrategy(llm_client) if SentimentRedditStrategy else None
-            self.twitter_collector = SentimentTwitterStrategy(llm_client) if SentimentTwitterStrategy else None
-            self.polymarket_collector = SentimentPolymarketStrategy(llm_client) if SentimentPolymarketStrategy else None
-        else:
-            self.reddit_collector = None
-            self.twitter_collector = None
-            self.polymarket_collector = None
+        self.reddit_collector = None
+        self.twitter_collector = None
+        self.polymarket_collector = None
 
     def _venues(self) -> List[str]:
         env = os.getenv("CB_VENUES", "").strip()
@@ -195,7 +186,44 @@ class MarketContextAggregator:
                 out[s] = {"bids": [], "asks": []}
         return out
 
+    def _fetch_ohlcv(self, symbols: List[str], timeframe: str = "1h", limit: int = 100) -> Dict[str, pd.DataFrame]:
+        """
+        Helper to fetch raw OHLCV data for technical analysis.
+        """
+        venues = self._venues()
+        primary = venues[0] if venues else "binance"
+        out: Dict[str, pd.DataFrame] = {}
+        log = get_logger()
+        try:
+            import ccxt
+            ex = getattr(ccxt, primary)({"enableRateLimit": True})
+            ex.load_markets()
+            for s in symbols:
+                s_ccxt = self._normalize_symbol_for_ccxt(s)
+                try:
+                    o = ex.fetch_ohlcv(s_ccxt, timeframe=timeframe, limit=limit) or []
+                    # Convert to DataFrame
+                    if o:
+                        df = pd.DataFrame(o, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+                        df.set_index("timestamp", inplace=True)
+                        out[s] = df
+                    else:
+                        log.warning(f"No OHLCV data for {s} ({s_ccxt}) from {primary}")
+                        out[s] = pd.DataFrame()
+                except Exception as e:
+                    log.warning(f"Failed to fetch OHLCV for {s} ({s_ccxt}): {e}")
+                    out[s] = pd.DataFrame()
+        except Exception as e:
+            log.error(f"Failed to initialize CCXT {primary} for OHLCV: {e}")
+            for s in symbols:
+                out[s] = pd.DataFrame()
+        return out
+
     def _get_volatility(self, symbols: List[str]) -> Dict[str, float]:
+        # Refactored to use _fetch_ohlcv logic indirectly or kept simple for backward compat
+        # Here we keep original implementation to avoid breaking existing consumers, 
+        # but we could unify if we wanted. For safety, I keep it as is but maybe optimized.
         venues = self._venues()
         primary = venues[0] if venues else "binance"
         vol_map: Dict[str, float] = {}
@@ -256,60 +284,13 @@ class MarketContextAggregator:
         They are used by ALL trading strategies to evaluate confidence and timing.
         """
         # Availability flags so missing signals do not penalize confidence
-        reddit_enabled = bool(getattr(getattr(self.config, "sentiment", object()), "reddit", object()) and getattr(self.config.sentiment.reddit, "enabled", False))
-        twitter_enabled = bool(getattr(getattr(self.config, "sentiment", object()), "twitter", object()) and getattr(self.config.sentiment.twitter, "enabled", False))
-        polymarket_enabled = bool(getattr(getattr(self.config, "sentiment", object()), "polymarket", object()) and getattr(self.config.sentiment.polymarket, "enabled", False))
-        twitter_token_present = bool(os.getenv("TWITTER_BEARER_TOKEN", "").strip())
-
+        # Sentiments are currently disabled/removed
+        
         sentiment: Dict[str, Any] = {
-            "reddit": {"score": 0.0, "confidence": None, "available": bool(self.reddit_collector) and reddit_enabled},
-            "twitter": {"score": 0.0, "confidence": None, "available": bool(self.twitter_collector) and twitter_enabled and twitter_token_present},
-            "polymarket": {"score": 0.0, "confidence": None, "available": bool(self.polymarket_collector) and polymarket_enabled},
+            "reddit": {"score": 0.0, "confidence": None, "available": False},
+            "twitter": {"score": 0.0, "confidence": None, "available": False},
+            "polymarket": {"score": 0.0, "confidence": None, "available": False},
         }
-        
-        # Collect Reddit signals
-        if self.reddit_collector and self.config and reddit_enabled:
-            try:
-                subreddits = getattr(self.config.sentiment.reddit, "subreddits", [])
-                if subreddits:
-                    reddit_signal = self.reddit_collector.detect_opportunities(subreddits)
-                    sentiment["reddit"] = {
-                        "score": float(reddit_signal.get("score", 0.0)),
-                        "confidence": float(reddit_signal.get("confidence", 0.0)),
-                        "available": True,
-                    }
-            except Exception:
-                pass
-        
-        # Collect Twitter signals
-        if self.twitter_collector and self.config and twitter_enabled and twitter_token_present:
-            try:
-                keywords = getattr(self.config.sentiment.twitter, "keywords", [])
-                if keywords:
-                    twitter_signal = self.twitter_collector.detect_opportunities(keywords)
-                    sentiment["twitter"] = {
-                        "score": float(twitter_signal.get("score", 0.0)),
-                        "confidence": float(twitter_signal.get("confidence", 0.0)),
-                        "available": True,
-                    }
-            except Exception:
-                pass
-        
-        # Collect Polymarket signals (highest confidence - real money bets)
-        if self.polymarket_collector and self.config and polymarket_enabled:
-            try:
-                keywords = getattr(self.config.sentiment.polymarket, "keywords", [])
-                if keywords:
-                    polymarket_signal = self.polymarket_collector.detect_opportunities(keywords)
-                    sentiment["polymarket"] = {
-                        "score": float(polymarket_signal.get("score", 0.0)),
-                        "confidence": float(polymarket_signal.get("confidence", 0.0)),
-                        "available": True,
-                        "markets_count": int(polymarket_signal.get("markets_count", 0)),
-                        "total_volume": float(polymarket_signal.get("total_volume", 0.0)),
-                    }
-            except Exception:
-                pass
         
         return sentiment
 
@@ -357,4 +338,22 @@ class MarketContextAggregator:
         ctx["price_change_pct"] = price_change_pct
         return ctx
 
+    def build_technical_context(self, symbols: List[str], timeframe: str = "5m") -> Dict[str, pd.DataFrame]:
+        """
+        Lightweight method for the strategy loop.
+        Fetches OHLCV for technical indicators.
+        """
+        return self._fetch_ohlcv(symbols, timeframe=timeframe, limit=100)
 
+    def get_candles(self, symbols: List[str], timeframe: str = "5m", limit: int = 100) -> Dict[str, pd.DataFrame]:
+        """
+        Public accessor for OHLCV candles.
+        """
+        return self._fetch_ohlcv(symbols, timeframe=timeframe, limit=limit)
+
+    def fetch_sentiment_on_demand(self, symbols: List[str]) -> Dict[str, Any]:
+        """
+        On-demand sentiment fetch. Currently grabs global/keyword sentiment,
+        could be refined to filter by symbol if collectors support it.
+        """
+        return self._get_sentiment()

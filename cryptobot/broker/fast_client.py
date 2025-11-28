@@ -70,6 +70,10 @@ class AsyncExecutionClient:
             await self.session.close()
             self.session = None
 
+    async def refresh_assets(self):
+        """Public method to refresh asset map."""
+        await self._fetch_asset_map()
+
     async def _fetch_asset_map(self):
         """Fetch universe to map symbols to asset IDs."""
         if not self.session:
@@ -111,6 +115,7 @@ class AsyncExecutionClient:
         order_type: Literal["limit", "market"] = "limit",
         reduce_only: bool = False,
         cloid: Optional[str] = None,
+        post_only: bool = False,
     ) -> Dict[str, Any]:
         """
         Sign and place an order.
@@ -131,14 +136,15 @@ class AsyncExecutionClient:
         
         # Order Type logic
         # Limit: { "limit": { "tif": "Gtc" } }
-        # Market: { "limit": { "tif": "Ioc" } } with aggressive price, OR "market" type?
-        # The "order" action expects "t" to be order type.
-        # For market orders, we usually send IOC with limit price crossing book.
+        # Market: { "limit": { "tif": "Ioc" } } with aggressive price
+        # Post-Only: { "limit": { "tif": "Alo" } }
         
         tif = "Gtc"
         if order_type == "market":
             tif = "Ioc"
             # Note: Ensure limit_px is aggressive enough for market buy/sell
+        elif post_only:
+            tif = "Alo"
         
         order_wire = {
             "a": asset_id,

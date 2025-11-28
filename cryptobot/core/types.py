@@ -54,3 +54,14 @@ class PortfolioSnapshot:
     cash: float
     equity: float
     unrealized_pnl: float
+
+
+@dataclass
+class Signal:
+    """Standard Signal object compatible with FastEngine."""
+    symbol: str
+    direction: str  # "long", "short", "flat"
+    confidence: float
+    price: float
+    reason: str
+    metadata: dict

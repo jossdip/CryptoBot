@@ -234,6 +234,7 @@ class HyperliquidBroker:
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
         client_id: Optional[str] = None,
+        post_only: bool = False,
     ) -> Dict[str, Any]:
         """Execute order on Hyperliquid.
 
@@ -302,6 +303,13 @@ class HyperliquidBroker:
                     try:
                         # Preferred: official signature with OrderType enum (robust resolution)
                         enum_limit = self._get_order_type_member("Limit")
+                        
+                        # Post-Only Override
+                        if post_only:
+                            # Construct raw dict for ALO (Add Liquidity Only)
+                            # This bypasses Enum checks in some SDK versions but is standard wire format
+                            enum_limit = {"limit": {"tif": "Alo"}}
+                            
                         if enum_limit is not None:
                             response = self._call_with_retries(self.client.order, hl_symbol, is_buy, float(q_sz), float(limit_px), enum_limit, False, client_id, None)  # type: ignore[misc]
                         else:

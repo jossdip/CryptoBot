@@ -76,8 +76,13 @@ class MultiStrategyExecutor:
         except Exception:
             pass
         # Prefer passive limit orders for market_making to avoid taker fees
-        order_type = "market"
-        price = None
+        # FORCE POST-ONLY (The Tank Strategy) - No Market Orders for entry
+        order_type = "limit"
+        post_only = True
+        price = float(decision.get("price", 0.0))
+        if price <= 0.0:
+             price = float(entry_price)
+
         if strategy_name == "market_making" and entry_price > 0.0:
             try:
                 spread = float(decision.get("spread", 0.0) or 0.0)
@@ -87,8 +92,14 @@ class MultiStrategyExecutor:
                 # Place limit inside the spread (post-only would be ideal, but not all SDKs expose it)
                 px = entry_price * (1.0 - spread / 2.0) if side == "buy" else entry_price * (1.0 + spread / 2.0)
                 if px > 0.0:
-                    order_type = "limit"
                     price = float(px)
+        
+        # Safety fallback: if price still 0 for limit order, try to use last close from decision if available
+        # or just fail to avoid market order (as per strict rules)
+        if price <= 0.0:
+             log.warning(f"Executor: Cannot place Limit Post-Only order without price. Skipping {symbol}.")
+             return None
+
         resp = self.broker.place_order(
             symbol=symbol,
             side=side,
@@ -98,6 +109,7 @@ class MultiStrategyExecutor:
             price=price,
             stop_loss=stop_loss,
             take_profit=take_profit,
+            post_only=post_only
         )
         try:
             if isinstance(resp, dict) and resp.get("ok"):

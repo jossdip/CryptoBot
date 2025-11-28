@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Usage: ./deploy/install_service.sh [service=paper]
-# Services: paper (default) or live
+# Services: paper (default), live, or sniper
 
 SERVICE=${1:-paper}
 UNIT_SRC="deploy/cryptobot-${SERVICE}.service"
