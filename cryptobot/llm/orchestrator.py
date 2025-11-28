@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from cryptobot.llm.client import LLMClient
-from cryptobot.llm.prompts import ALLOCATION_PROMPT_TEMPLATE, TRADE_PROMPT_TEMPLATE, POSITION_PROMPT_TEMPLATE, RUNTIME_PARAMS_PROMPT_TEMPLATE
+from cryptobot.llm.prompts import ALLOCATION_PROMPT_TEMPLATE, TRADE_PROMPT_TEMPLATE, POSITION_PROMPT_TEMPLATE, RUNTIME_PARAMS_PROMPT_TEMPLATE, BREAKOUT_VERIFICATION_PROMPT
 from cryptobot.core.logging import get_llm_logger
 
 
@@ -469,5 +469,70 @@ class LLMOrchestrator:
         except Exception:
             pass
         return params
-
-
+    
+    def verify_breakout_signal(
+        self,
+        signal_context: Dict[str, Any],
+        sentiment_context: Dict[str, Any],
+        market_data: Dict[str, Any],
+        portfolio_state: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Surgical check for Breakout strategy.
+        """
+        prompt = BREAKOUT_VERIFICATION_PROMPT.format(
+            signal_context=signal_context,
+            sentiment_context=sentiment_context,
+            market_data=market_data,
+            portfolio_state=portfolio_state
+        )
+        
+        get_llm_logger().debug({
+            "event": "orchestrator_build_prompt",
+            "type": "breakout_verification",
+            "signal": signal_context.get("symbol")
+        })
+        
+        response = self.llm.call(prompt=prompt, json_mode=True)
+        
+        # Parse response
+        verified = bool(response.get("verified", False))
+        confidence = float(response.get("confidence", 0.0))
+        leverage = max(1, min(50, int(response.get("leverage", 1))))
+        stop_loss_pct = float(response.get("stop_loss_pct", 0.01))
+        
+        # Record
+        try:
+            from time import time as _time
+            from json import dumps as _dumps
+            from cryptobot.monitor.insights import build_decision as _build_decision
+            if self._decision_sink:
+                d = _build_decision(
+                    timestamp=_time(),
+                    decision_type="breakout_verification",
+                    prompt=prompt,
+                    raw_response=response if isinstance(response, dict) else _dumps(response),
+                    metadata={"signal": signal_context},
+                )
+                self._decision_sink(
+                    {
+                        "timestamp": d.timestamp,
+                        "decision_type": d.decision_type,
+                        "prompt": d.prompt,
+                        "response": d.response,
+                        "reasoning": d.reasoning,
+                        "sentiment": d.sentiment,
+                        "confidence": d.confidence,
+                        "metadata": d.metadata,
+                    }
+                )
+        except Exception:
+            pass
+            
+        return {
+            "verified": verified,
+            "confidence": confidence,
+            "leverage": leverage,
+            "stop_loss_pct": stop_loss_pct,
+            "reasoning": response.get("reasoning", "")
+        }

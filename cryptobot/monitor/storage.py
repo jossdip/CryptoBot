@@ -23,6 +23,8 @@ class StorageManager:
       - performance_metrics
       - weights_history
       - runtime_status (singleton row id=1)
+      - episodes
+      - episode_embeddings
     """
 
     def __init__(self, db_path: str = "~/.cryptobot/monitor.db") -> None:
@@ -151,6 +153,7 @@ class StorageManager:
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_ts ON episodes(timestamp)")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_strategy ON episodes(strategy)")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_episode_embeddings_eid ON episode_embeddings(episode_id)")
+            
             # Online migration: ensure newly added columns exist in older DBs
             try:
                 cols = [row[1] for row in self._conn.execute("PRAGMA table_info(runtime_status)").fetchall()]
@@ -158,6 +161,17 @@ class StorageManager:
                     self._conn.execute("ALTER TABLE runtime_status ADD COLUMN desired_flatten INTEGER DEFAULT 0")
             except Exception:
                 pass
+            
+            # Migration for Episodes: Add market_regime and volatility_index
+            try:
+                cols = [row[1] for row in self._conn.execute("PRAGMA table_info(episodes)").fetchall()]
+                if "market_regime" not in cols:
+                    self._conn.execute("ALTER TABLE episodes ADD COLUMN market_regime TEXT")
+                if "volatility_index" not in cols:
+                    self._conn.execute("ALTER TABLE episodes ADD COLUMN volatility_index REAL DEFAULT 0.0")
+            except Exception:
+                pass
+
             # Ensure a singleton row exists
             self._conn.execute(
                 """
@@ -176,13 +190,15 @@ class StorageManager:
         features: Dict[str, Any],
         decision: Dict[str, Any],
         outcome: Dict[str, Any],
+        market_regime: Optional[str] = None,
+        volatility_index: float = 0.0,
     ) -> int:
         """Insert an episode and return its id."""
         with self._lock, self._conn:
             cur = self._conn.execute(
                 """
-                INSERT INTO episodes (timestamp, strategy, symbol, features_json, decision_json, outcome_json)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO episodes (timestamp, strategy, symbol, features_json, decision_json, outcome_json, market_regime, volatility_index)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     float(timestamp),
@@ -191,6 +207,8 @@ class StorageManager:
                     json.dumps(features or {}),
                     json.dumps(decision or {}),
                     json.dumps(outcome or {}),
+                    str(market_regime) if market_regime else None,
+                    float(volatility_index),
                 ),
             )
             try:
@@ -198,12 +216,20 @@ class StorageManager:
             except Exception:
                 return 0
 
-    def query_episodes(self, *, limit: int = 1000, strategy: Optional[str] = None) -> List[Dict[str, Any]]:
-        q = "SELECT id, timestamp, strategy, symbol, features_json, decision_json, outcome_json FROM episodes"
+    def query_episodes(self, *, limit: int = 1000, strategy: Optional[str] = None, regime: Optional[str] = None) -> List[Dict[str, Any]]:
+        q = "SELECT id, timestamp, strategy, symbol, features_json, decision_json, outcome_json, market_regime, volatility_index FROM episodes"
         args: List[Any] = []
+        conds = []
         if strategy:
-            q += " WHERE strategy = ?"
+            conds.append("strategy = ?")
             args.append(strategy)
+        if regime:
+            conds.append("market_regime = ?")
+            args.append(regime)
+            
+        if conds:
+            q += " WHERE " + " AND ".join(conds)
+            
         q += " ORDER BY timestamp DESC LIMIT ?"
         args.append(int(limit))
         rows = self._conn.execute(q, tuple(args)).fetchall()
@@ -219,6 +245,8 @@ class StorageManager:
                         "features": json.loads(r[4] or "{}"),
                         "decision": json.loads(r[5] or "{}"),
                         "outcome": json.loads(r[6] or "{}"),
+                        "market_regime": r[7],
+                        "volatility_index": float(r[8] or 0.0),
                     }
                 )
             except Exception:
@@ -364,8 +392,8 @@ class StorageManager:
                 (
                     float(timestamp),
                     strategy,
-                    float(pnl),
-                    float(roi),
+                    pnl,
+                    roi,
                     float(win_rate),
                     float(sharpe),
                     float(max_drawdown),
@@ -579,5 +607,3 @@ class StorageManager:
                 self._conn.close()
             except Exception:
                 pass
-
-
